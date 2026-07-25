@@ -1,0 +1,505 @@
+/**
+ * magnetic dynamics -- dialog setup
+ * @author Tobias Weber <tweber@ill.fr>
+ * @date 2022 - 2026
+ * @license GPLv3, see 'LICENSE' file
+ * @desc The present version was forked on 28-Dec-2018 from my privately developed "misc" project (https://github.com/t-weber/misc).
+ *
+ * ----------------------------------------------------------------------------
+ * magpie & mag-core
+ * Copyright (C) 2018-2026  Tobias WEBER (Institut Laue-Langevin (ILL),
+ *                          Grenoble, France).
+ * "misc" project
+ * Copyright (C) 2017-2022  Tobias WEBER (privately developed).
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, version 3 of the License.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ * ----------------------------------------------------------------------------
+ */
+
+#include "magdyn.h"
+
+
+// instantiate settings dialog
+template class SettingsDlg<g_settingsvariables.size(), &g_settingsvariables>;
+using t_SettingsDlg = SettingsDlg<g_settingsvariables.size(), &g_settingsvariables>;
+
+
+
+/**
+ * initialise the static part of the settings dialog
+ */
+void MagDynDlg::InitSettingsDlg()
+{
+	// set-up common gui settings variables
+	t_SettingsDlg::SetGuiTheme(&g_theme);
+	t_SettingsDlg::SetGuiFont(&g_font);
+	t_SettingsDlg::SetGuiFont3d(&g_font3d);
+	t_SettingsDlg::SetGuiUseNativeMenubar(&g_use_native_menubar);
+	t_SettingsDlg::SetGuiUseNativeDialogs(&g_use_native_dialogs);
+
+	// restore settings
+	t_SettingsDlg::ReadSettings(m_sett);
+}
+
+
+
+/**
+ * get changes from settings dialog
+ */
+void MagDynDlg::InitSettings()
+{
+	// calculator settings
+	m_dyn.SetSilent(g_silent);
+	m_dyn.SetPerformChecks(g_checks);
+	m_dyn.SetEpsilon(g_eps);
+	m_dyn.SetPrecision(g_prec);
+	m_dyn.SetBoseCutoffEnergy(g_bose_cutoff);
+	m_dyn.SetCholeskyMaxTries(g_cholesky_maxtries);
+	m_dyn.SetCholeskyInc(g_cholesky_delta);
+	m_dyn.SetCholeskyFailOnWrong(g_cholesky_fail_when_wrong != 0);
+	if(g_uc_01)
+		m_dyn.SetUnitCellExtents(0., 1.);
+	else
+		m_dyn.SetUnitCellExtents(-0.5, 0.5);
+
+	m_recent.SetMaxRecentFiles(g_maxnum_recents);
+	m_recent_struct.SetMaxRecentFiles(g_maxnum_recents);
+
+	// main font
+	if(g_font != "")
+	{
+		QFont font = this->font();
+		if(font.fromString(g_font))
+			setFont(font);
+	}
+
+	// font for 3d views
+	if(g_font3d != "")
+	{
+		if(m_disp3d_dlg)
+			m_disp3d_dlg->SetPlotFont(g_font3d);
+		if(m_structplot_dlg)
+			m_structplot_dlg->SetPlotFont(g_font3d);
+		if(m_bz_dlg)
+			m_bz_dlg->SetPlotFont(g_font3d);
+	}
+}
+
+
+
+/**
+ * settings dialog
+ */
+void MagDynDlg::ShowSettingsDlg()
+{
+	if(!m_settings_dlg)
+	{
+		m_settings_dlg = new t_SettingsDlg(this, m_sett);
+
+		dynamic_cast<t_SettingsDlg*>(m_settings_dlg)->AddChangedSettingsSlot([this]()
+		{
+			MagDynDlg::InitSettings();
+		});
+	}
+
+	m_settings_dlg->show();
+	m_settings_dlg->raise();
+	m_settings_dlg->activateWindow();
+}
+
+
+
+/**
+ * coupling assignment dialog
+ */
+void MagDynDlg::ShowAssignDlg(bool only_create)
+{
+	if(!m_assign_dlg)
+	{
+		m_assign_dlg = new AssignDlg(this, m_sett);
+		m_assign_dlg->setFont(this->font());
+
+		connect(m_assign_dlg, &AssignDlg::AssignCouplingsBySymmetryIndex,
+			this, &MagDynDlg::AssignCouplingsBySymmetryIndex);
+	}
+
+	if(!only_create)
+	{
+		m_assign_dlg->show();
+		m_assign_dlg->raise();
+		m_assign_dlg->activateWindow();
+	}
+}
+
+
+
+/**
+ * notes dialog
+ */
+void MagDynDlg::ShowMatrixElemsDlg(bool only_create)
+{
+	if(!m_matrixelems_dlg)
+	{
+		m_matrixelems_dlg = new MatrixElemsDlg(this, m_sett);
+		m_matrixelems_dlg->setFont(this->font());
+
+		connect(m_matrixelems_dlg, &MatrixElemsDlg::StateChanged, [this]()
+		{
+			this->PlotDispersion();
+		});
+	}
+
+	if(!only_create)
+	{
+		m_matrixelems_dlg->show();
+		m_matrixelems_dlg->raise();
+		m_matrixelems_dlg->activateWindow();
+	}
+}
+
+
+
+/**
+ * notes dialog
+ */
+void MagDynDlg::ShowNotesDlg(bool only_create)
+{
+	if(!m_notes_dlg)
+	{
+		m_notes_dlg = new NotesDlg(this, m_sett);
+		m_notes_dlg->setFont(this->font());
+	}
+
+	if(!only_create)
+	{
+		m_notes_dlg->show();
+		m_notes_dlg->raise();
+		m_notes_dlg->activateWindow();
+	}
+}
+
+
+
+/**
+ * about dialog
+ */
+void MagDynDlg::ShowInfoDlg(bool only_create)
+{
+	if(!m_info_dlg)
+	{
+		m_info_dlg = new InfoDlg(this, m_sett);
+		m_info_dlg->setFont(this->font());
+	}
+
+	if(!only_create)
+	{
+		m_info_dlg->show();
+		m_info_dlg->raise();
+		m_info_dlg->activateWindow();
+	}
+}
+
+
+
+/**
+ * gl renderer info dialog
+ */
+void MagDynDlg::ShowGlInfoDlg(bool only_create)
+{
+	if(!m_glinfo_dlg)
+	{
+		m_glinfo_dlg = new GlInfoDlg(this, m_sett);
+		m_glinfo_dlg->setFont(this->font());
+	}
+
+	if(!only_create)
+	{
+		m_glinfo_dlg->show();
+		m_glinfo_dlg->raise();
+		m_glinfo_dlg->activateWindow();
+	}
+}
+
+
+
+/**
+ * structure plotter dialog
+ */
+void MagDynDlg::ShowStructPlotDlg(bool only_create)
+{
+	if(!m_structplot_dlg)
+	{
+		m_structplot_dlg = new StructPlotDlg(this, m_sett);
+		m_structplot_dlg->setFont(this->font());
+		m_structplot_dlg->SetPlotFont(g_font3d);
+
+		m_structplot_dlg->SetKernel(&m_dyn);
+		m_structplot_dlg->SetTables(m_sitestab, m_termstab);
+
+		connect(m_structplot_dlg, &StructPlotDlg::SelectSite,
+			this, &MagDynDlg::SelectSite);
+		connect(m_structplot_dlg, &StructPlotDlg::DeleteSite,
+			this, &MagDynDlg::DeleteSite);
+		connect(m_structplot_dlg, &StructPlotDlg::FlipSiteSpin,
+			this, &MagDynDlg::FlipSiteSpin);
+
+		connect(m_structplot_dlg, &StructPlotDlg::SelectTerm,
+			this, &MagDynDlg::SelectTerm);
+		connect(m_structplot_dlg, &StructPlotDlg::DeleteTerm,
+			this, &MagDynDlg::DeleteTerm);
+
+		connect(m_structplot_dlg, &StructPlotDlg::GlDeviceInfos,
+			m_glinfo_dlg, &GlInfoDlg::SetGlDeviceInfos);
+	}
+
+	if(!only_create)
+	{
+		m_structplot_dlg->show();
+		m_structplot_dlg->raise();
+		m_structplot_dlg->activateWindow();
+	}
+}
+
+
+
+/**
+ * ground state minimiser dialog
+ */
+void MagDynDlg::ShowGroundStateDlg(bool only_create)
+{
+	if(!m_groundstate_dlg)
+	{
+		m_groundstate_dlg = new GroundStateDlg(this, m_sett);
+		m_groundstate_dlg->setFont(this->font());
+
+		m_groundstate_dlg->SetKernel(&m_dyn);
+
+		connect(m_groundstate_dlg, &GroundStateDlg::SpinsUpdated,
+			[this](const t_magdyn* dyn)
+		{
+			this->SetKernel(dyn, true, false, false);
+		});
+	}
+
+	if(!only_create)
+	{
+		m_groundstate_dlg->show();
+		m_groundstate_dlg->raise();
+		m_groundstate_dlg->activateWindow();
+	}
+}
+
+
+
+/**
+ * topology dialog
+ */
+void MagDynDlg::ShowTopologyDlg(bool only_create)
+{
+	if(!m_topo_dlg)
+	{
+		m_topo_dlg = new TopologyDlg(this, m_sett);
+		m_topo_dlg->setFont(this->font());
+
+		m_topo_dlg->SetKernel(&m_dyn);
+
+		// set Q position
+		auto [Q_start, Q_end] = GetDispersionQ();
+		m_topo_dlg->SetDispersionQ(Q_start, Q_end);
+	}
+
+	if(!only_create)
+	{
+		m_topo_dlg->show();
+		m_topo_dlg->raise();
+		m_topo_dlg->activateWindow();
+	}
+}
+
+
+
+/**
+ * differentiation dialog
+ */
+void MagDynDlg::ShowDiffDlg(bool only_create)
+{
+	if(!m_diff_dlg)
+	{
+		m_diff_dlg = new DiffDlg(this, m_sett);
+		m_diff_dlg->setFont(this->font());
+
+		m_diff_dlg->SetKernel(&m_dyn);
+
+		// set Q position
+		auto [Q_start, Q_end] = GetDispersionQ();
+		m_diff_dlg->SetDispersionQ(Q_start, Q_end);
+	}
+
+	if(!only_create)
+	{
+		m_diff_dlg->show();
+		m_diff_dlg->raise();
+		m_diff_dlg->activateWindow();
+	}
+}
+
+
+
+/**
+ * powder spectra dialog
+ */
+void MagDynDlg::ShowPowderDlg(bool only_create)
+{
+	if(!m_powder_dlg)
+	{
+		m_powder_dlg = new PowderDlg(this, m_sett);
+		m_powder_dlg->setFont(this->font());
+
+		m_powder_dlg->SetKernel(&m_dyn);
+
+		// set Q position
+		auto [Q_start, Q_end] = GetDispersionQ();
+		auto [E_start, E_end] = GetDispersionE();
+		m_powder_dlg->SetDispersionQE(Q_start, Q_end, E_start, E_end);
+	}
+
+	if(!only_create)
+	{
+		m_powder_dlg->show();
+		m_powder_dlg->raise();
+		m_powder_dlg->activateWindow();
+	}
+}
+
+
+
+/**
+ * form factor plotting dialog
+ */
+void MagDynDlg::ShowFormFactorDlg(bool only_create)
+{
+	if(!m_ffact_dlg)
+	{
+		m_ffact_dlg = new FormFactorDlg(this, m_sett);
+		m_ffact_dlg->setFont(this->font());
+
+		PlotFormFactors();
+	}
+
+	if(!only_create)
+	{
+		m_ffact_dlg->show();
+		m_ffact_dlg->raise();
+		m_ffact_dlg->activateWindow();
+	}
+}
+
+
+
+/**
+ * 3d dispersion dialog
+ */
+void MagDynDlg::ShowDispersion3DDlg(bool only_create)
+{
+	if(!m_disp3d_dlg)
+	{
+		m_disp3d_dlg = new Dispersion3DDlg(this, m_sett);
+		m_disp3d_dlg->setFont(this->font());
+		m_disp3d_dlg->SetPlotFont(g_font3d);
+
+		m_disp3d_dlg->SetKernel(&m_dyn);
+
+		// set Q position
+		auto [Q_start, Q_end] = GetDispersionQ();
+		m_disp3d_dlg->SetDispersionQ(Q_start, Q_end);
+
+		connect(m_disp3d_dlg, &Dispersion3DDlg::GlDeviceInfos,
+			m_glinfo_dlg, &GlInfoDlg::SetGlDeviceInfos);
+	}
+
+	if(!m_disp3d_dlg->IsPlotterValid())
+	{
+		delete m_disp3d_dlg;
+		m_disp3d_dlg = nullptr;
+
+		ShowError("Invalid plot renderer.");
+		return;
+	}
+
+	if(!only_create)
+	{
+		m_disp3d_dlg->show();
+		m_disp3d_dlg->raise();
+		m_disp3d_dlg->activateWindow();
+	}
+}
+
+
+
+/**
+ * show the 3d brillouin zone plotter
+ */
+void MagDynDlg::ShowBZ3DDlg(bool only_create)
+{
+	if(!m_bz_dlg)
+	{
+		m_bz_dlg = new BZPlotDlg(this, m_sett);
+		m_bz_dlg->setFont(this->font());
+		m_bz_dlg->SetPlotFont(g_font3d);
+
+		// context menu
+		QMenu* context = m_bz_dlg->GetContextMenu();
+		QAction *acSetQi = new QAction("Set Start Q", context);
+		QAction *acSetQf = new QAction("Set End Q", context);
+
+		QAction* acFirst = context->actions().first();
+		context->insertAction(acFirst, acSetQi);
+		context->insertAction(acFirst, acSetQf);
+		context->insertSeparator(acFirst);
+
+		// connections
+		connect(m_bz_dlg, &BZPlotDlg::NeedRecalc, [this]()
+		{
+			this->CalcBZ();
+			this->DispersionQChanged(false);
+		});
+		connect(m_bz_dlg, &BZPlotDlg::GlDeviceInfos,
+			m_glinfo_dlg, &GlInfoDlg::SetGlDeviceInfos);
+
+		connect(acSetQi, &QAction::triggered, [this]()
+		{
+			const t_vec_real& Qrlu = m_bz_dlg->GetClickedPosition(true);
+			if(Qrlu.size() != 3)
+				return;
+
+			SetCoordinates(Qrlu, t_vec_real{}, true);
+		});
+
+		connect(acSetQf, &QAction::triggered, [this]()
+		{
+			const t_vec_real& Qrlu = m_bz_dlg->GetClickedPosition(true);
+			if(Qrlu.size() != 3)
+				return;
+
+			SetCoordinates(t_vec_real{}, Qrlu, true);
+		});
+	}
+
+	if(!only_create)
+	{
+		m_bz_dlg->show();
+		m_bz_dlg->raise();
+		m_bz_dlg->activateWindow();
+		m_bz_dlg->focusWidget();
+	}
+}

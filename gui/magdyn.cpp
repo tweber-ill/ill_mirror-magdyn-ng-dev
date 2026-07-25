@@ -1,0 +1,949 @@
+/**
+ * magnetic dynamics -- main gui setup and handler functions
+ * @author Tobias Weber <tweber@ill.fr>
+ * @date 2022 - 2026
+ * @license GPLv3, see 'LICENSE' file
+ * @desc The present version was forked on 28-Dec-2018 from my privately developed "misc" project (https://github.com/t-weber/misc).
+ *
+ * ----------------------------------------------------------------------------
+ * magpie & mag-core
+ * Copyright (C) 2018-2026  Tobias WEBER (Institut Laue-Langevin (ILL),
+ *                          Grenoble, France).
+ * "misc" project
+ * Copyright (C) 2017-2022  Tobias WEBER (privately developed).
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, version 3 of the License.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ * ----------------------------------------------------------------------------
+ */
+
+#include <boost/scope_exit.hpp>
+
+#include "magdyn.h"
+#include "libs/loadcif.h"
+
+#include <QtCore/QMimeData>
+#include <QtWidgets/QMessageBox>
+#include <QtWidgets/QGridLayout>
+#include <QtWidgets/QPushButton>
+#include <QtWidgets/QLabel>
+#include <QtGui/QDesktopServices>
+
+
+
+MagDynDlg::MagDynDlg(QWidget* pParent) : QDialog{pParent},
+	m_sett{new QSettings{"takin", "magdyn", this}}
+{
+	BOOST_SCOPE_EXIT(this_)
+	{
+		this_->m_ignoreCalc = false;
+	} BOOST_SCOPE_EXIT_END
+
+
+	// restore settings done from takin main settings dialog
+	get_settings_from_takin_core();
+	if(g_font != "")
+	{
+		QFont font = this->font();
+		if(font.fromString(g_font))
+			setFont(font);
+	}
+
+	InitSettingsDlg();
+
+	// read settings that require a restart
+	m_allow_ortho_spin = (g_allow_ortho_spin != 0);
+	m_allow_general_J = (g_allow_general_J != 0);
+
+	// create gui
+	CreateMainWindow();
+	CreateMenuBar();
+	InitResources();
+
+	// pre-create dialogs
+	ShowGlInfoDlg(true);
+	ShowMatrixElemsDlg(true);
+	ShowNotesDlg(true);
+
+	// create input panels
+	CreateSamplePanel();
+	CreateSitesPanel();
+	CreateExchangeTermsPanel();
+	CreateSampleEnvPanel();
+	CreateVariablesPanel();
+
+	CreateReciprocalPanel();
+	CreateCoordinatesPanel();
+
+	// create output panels
+	CreateDispersionPanel();
+	CreateHamiltonPanel();
+	CreateExportPanel();
+
+	PopulateSpaceGroups(true);
+
+	InitSettings();
+
+	// restore settings
+	if(m_sett)
+	{
+		// restore window size and position
+		if(m_sett->contains("geo"))
+			restoreGeometry(m_sett->value("geo").toByteArray());
+		else
+			resize(800, 600);
+
+		if(m_sett->contains("recent_files"))
+			m_recent.SetRecentFiles(m_sett->value("recent_files").toStringList());
+
+		if(m_sett->contains("recent_struct_files"))
+			m_recent_struct.SetRecentFiles(m_sett->value("recent_struct_files").toStringList());
+
+		if(m_sett->contains("splitter"))
+			m_split_inout->restoreState(m_sett->value("splitter").toByteArray());
+	}
+
+	setAcceptDrops(true);
+	Clear();
+}
+
+
+
+MagDynDlg::~MagDynDlg()
+{
+	Clear();
+
+	// remove dialogs
+	for(QDialog** dlg : {
+		(QDialog**)&m_settings_dlg, (QDialog**)&m_table_import_dlg,
+		(QDialog**)&m_matrixelems_dlg, (QDialog**)&m_notes_dlg,
+		(QDialog**)&m_pol, (QDialog**)&m_assign_dlg,
+		(QDialog**)&m_info_dlg, (QDialog**)&m_glinfo_dlg,
+		(QDialog**)&m_structplot_dlg, (QDialog**)&m_groundstate_dlg,
+		(QDialog**)&m_topo_dlg, (QDialog**)&m_diff_dlg,
+		(QDialog**)&m_powder_dlg, (QDialog**)&m_ffact_dlg,
+		(QDialog**)&m_disp3d_dlg, (QDialog**)&m_bz_dlg,
+		(QDialog**)&m_trafos, (QDialog**)&m_plot2d,
+		(QDialog**)&m_plot3d, (QDialog**)&m_bz_tool })
+	{
+		if(!dlg || !*dlg)
+			continue;
+		delete reinterpret_cast<QDialog*>(*dlg);
+		*dlg = nullptr;
+	}
+}
+
+
+
+void MagDynDlg::InitResources()
+{
+	QString appPath = QApplication::applicationDirPath();
+
+	// find resource directories
+	std::vector<QString> resdirs;
+
+	auto add_path = [&resdirs](const QString& path)
+	{
+		if(QDir{path}.exists())
+		{
+			resdirs.push_back(path);
+#ifndef NDEBUG
+			std::cerr << "Added resource directory: \""
+				<< path.toStdString() << "\"." << std::endl;
+#endif
+		}
+	};
+
+	add_path(appPath + "/res/");
+	add_path(appPath + "/resources/");
+	add_path(appPath + "/../resources/");
+	add_path("res/");
+	add_path(QDir::homePath() + "/.magpie");
+	add_path("/usr/local/share/magpie/res/");
+	add_path("/usr/share/magpie/res/");
+
+	if(resdirs.size() == 0)
+		std::cerr << "Warning: Resource directory could not be found." << std::endl;
+
+	m_ff.Clear();
+	for(const QString& resdir : resdirs)  // iterate resource directories
+	{
+		// form factor table
+		if(m_ff.GetFormfactorCount() == 0 && QFileInfo{resdir + "magffacts.xml"}.exists())
+		{
+			if(!m_ff.LoadTable(resdir.toStdString() + "magffacts.xml", true))
+				m_ff.Clear();
+		}
+
+		// main icon
+		if(g_icon.isNull() && QFileInfo{resdir + "magpie.svg"}.exists())
+			g_icon = QIcon{resdir + "magpie.svg"};
+	}
+
+	if(!g_icon.isNull())
+		setWindowIcon(g_icon);
+}
+
+
+
+void MagDynDlg::CreateMainWindow()
+{
+	SetCurrentFile("");
+	setSizeGripEnabled(true);
+
+	m_tabs_in = new QTabWidget(this);
+	m_tabs_setup = new QTabWidget(this);
+	m_tabs_recip = new QTabWidget(this);
+	m_tabs_out = new QTabWidget(this);
+
+	m_tabs_in->addTab(m_tabs_setup, "Structure");
+	m_tabs_in->addTab(m_tabs_recip, "Reciprocal Space");
+
+	// fixed status
+	m_statusFixed = new QLabel(this);
+	m_statusFixed->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
+	m_statusFixed->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+	m_statusFixed->setFrameShape(QFrame::Panel);
+	m_statusFixed->setFrameShadow(QFrame::Sunken);
+	m_statusFixed->setText("Ready.");
+
+	// expanding status
+	m_status = new QLabel(this);
+	m_status->setAlignment(Qt::AlignVCenter | Qt::AlignLeft);
+	m_status->setSizePolicy(QSizePolicy::/*Expanding*/Ignored, QSizePolicy::Fixed);
+	m_status->setFrameShape(QFrame::Panel);
+	m_status->setFrameShadow(QFrame::Sunken);
+
+	// progress bar
+	m_progress = new QProgressBar(this);
+	m_progress->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+
+	// start/stop button
+	m_btnStartStop = new QPushButton("Calculate", this);
+	m_btnStartStop->setIcon(QIcon::fromTheme("media-playback-start"));
+	m_btnStartStop->setToolTip("Start calculation.");
+	m_btnStartStop->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
+
+	// show 3d structure
+	QPushButton *btnShowStruct = new QPushButton("3D Structure...", this);
+	btnShowStruct->setIcon(QIcon::fromTheme("applications-graphics"));
+	btnShowStruct->setToolTip("Show a 3D view of the magnetic sites and couplings.");
+	btnShowStruct->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
+
+	// show 3d dispersion
+	QPushButton *btnShowDisp3d = new QPushButton("3D Dispersion...", this);
+	btnShowDisp3d->setIcon(QIcon::fromTheme("applications-graphics"));
+	btnShowDisp3d->setToolTip("Calculate 3D dispersion.");
+	btnShowDisp3d->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Preferred);
+
+	// splitter for input and output tabs
+	m_split_inout = new QSplitter(this);
+	m_split_inout->setOrientation(Qt::Horizontal);
+	m_split_inout->setChildrenCollapsible(true);
+	m_split_inout->addWidget(m_tabs_in);
+	m_split_inout->addWidget(m_tabs_out);
+
+	// main grid
+	m_maingrid = new QGridLayout(this);
+	m_maingrid->setSpacing(4);
+	m_maingrid->setContentsMargins(8, 8, 8, 8);
+	m_maingrid->addWidget(m_split_inout, 0,0, 1,9);
+	m_maingrid->addWidget(m_statusFixed, 1,0, 1,1);
+	m_maingrid->addWidget(m_status, 1,1, 1,3);
+	m_maingrid->addWidget(m_progress, 1,4, 1,2);
+	m_maingrid->addWidget(m_btnStartStop, 1,6, 1,1);
+	m_maingrid->addWidget(btnShowStruct, 1,7, 1,1);
+	m_maingrid->addWidget(btnShowDisp3d, 1,8, 1,1);
+
+	// signals
+	connect(m_btnStartStop, &QAbstractButton::clicked, [this]()
+	{
+		// behaves as start or stop button?
+		if(m_inputEnabled)
+			this->CalcAll();
+		else
+			m_stopRequested = true;
+	});
+
+	connect(btnShowStruct, &QAbstractButton::clicked, this, &MagDynDlg::ShowStructPlotDlg);
+	connect(btnShowDisp3d, &QAbstractButton::clicked, this, &MagDynDlg::ShowDispersion3DDlg);
+}
+
+
+
+/**
+ * main menu
+ */
+void MagDynDlg::CreateMenuBar()
+{
+	m_menu = new QMenuBar(this);
+
+	// file menu
+	QMenu *menuFile = new QMenu("File", m_menu);
+	QAction *acNew = new QAction("New", menuFile);
+	QAction *acLoad = new QAction("Open...", menuFile);
+	QAction *acImportCIF = new QAction("Import CIF...", menuFile);
+	QAction *acImportStructure = new QAction("Import Structure...", menuFile);
+	QAction *acSave = new QAction("Save", menuFile);
+	QAction *acSaveAs = new QAction("Save As...", menuFile);
+	QAction *acExit = new QAction("Quit", menuFile);
+
+	// structure menu
+	QMenu *menuStruct = new QMenu("Structure", m_menu);
+	QAction *acStructSymIdx = new QAction("Assign Symmetry Indices", menuStruct);
+	QAction *acStructSortCouplings = new QAction("Sort Couplings by Length", menuStruct);
+	QAction *acStructAssignCouplings = new QAction("Assign Multiple Couplings...", menuStruct);
+	QAction *acStructRemoveUnusedCouplings = new QAction("Remove Unused Couplings", menuStruct);
+	QAction *acStructNotes = new QAction("Notes...", menuStruct);
+	QAction *acStructView = new QAction("View 3D Structure...", menuStruct);
+	QAction *acBZView = new QAction("View 3D Brillouin Zone...", menuStruct);
+	QAction *acGroundState = new QAction("Minimise Ground State...", menuStruct);
+
+	// import / export menu
+	QMenu *menuExport = new QMenu("Import / Export", m_menu);
+	QAction *acStructImport = new QAction("Import From Table...", menuExport);
+	QAction *acStructExportSun = new QAction("Export To Sunny Code...", menuExport);
+	QAction *acStructExportSW = new QAction("Export To SpinW Code...", menuExport);
+	QAction *acStructExportScript = new QAction("Export To Python Code...", menuExport);
+
+	// dispersion plot menu
+	m_menuDisp = new QMenu("Dispersion Plot", m_menu);
+	m_plot_channels = new QAction("Plot Channels", m_menuDisp);
+	m_plot_channels->setToolTip("Plot individual polarisation channels.");
+	m_plot_channels->setCheckable(true);
+	m_plot_channels->setChecked(false);
+	QAction* acChannels = new QAction("Select Channels...", m_menuDisp);
+	m_plot_degeneracies = new QAction("Plot Degeneracies", m_menuDisp);
+	m_plot_degeneracies->setToolTip("Mark degenerate dispersion branches.");
+	m_plot_degeneracies->setCheckable(true);
+	m_plot_degeneracies->setChecked(false);
+	QAction *acRescalePlot = new QAction("Rescale Axes", m_menuDisp);
+	QAction *acSaveFigure = new QAction("Save Figure...", m_menuDisp);
+	QAction *acSaveDisp = new QAction("Save Data...", m_menuDisp);
+	QAction *acSaveMultiDisp = new QAction("Save Data For All Qs...", m_menuDisp);
+	QAction *acSaveDispScr = new QAction("Save Data As Script...", m_menuDisp);
+	QAction *acSaveMultiDispScr = new QAction("Save Data As Script For All Qs...", m_menuDisp);
+
+	acChannels->setEnabled(m_plot_channels->isChecked());
+
+	// weight plot sub-menu
+	QMenu *menuWeights = new QMenu("Plot Weights", m_menuDisp);
+	m_plot_weights_pointsize = new QAction("As Point Size", menuWeights);
+	m_plot_weights_alpha = new QAction("As Colour Alpha", menuWeights);
+	m_plot_weights_pointsize->setCheckable(true);
+	m_plot_weights_pointsize->setChecked(true);
+	m_plot_weights_alpha->setCheckable(true);
+	m_plot_weights_alpha->setChecked(false);
+	menuWeights->addAction(m_plot_weights_pointsize);
+	menuWeights->addAction(m_plot_weights_alpha);
+
+	// recent files menus
+	m_menuOpenRecent = new QMenu("Open Recent", menuFile);
+	m_menuImportStructRecent = new QMenu("Import Recent", menuFile);
+
+	// recently opened files
+	m_recent.SetRecentFilesMenu(m_menuOpenRecent);
+	m_recent.SetMaxRecentFiles(g_maxnum_recents);
+	m_recent.SetOpenFunc(&m_open_func);
+
+	// recently imported structure files
+	m_recent_struct.SetRecentFilesMenu(m_menuImportStructRecent);
+	m_recent_struct.SetMaxRecentFiles(g_maxnum_recents);
+	m_recent_struct.SetOpenFunc(&m_import_struct_func);
+
+	// shortcuts
+	acNew->setShortcut(QKeySequence::New);
+	acLoad->setShortcut(QKeySequence::Open);
+	acSave->setShortcut(QKeySequence::Save);
+	acSaveAs->setShortcut(QKeySequence::SaveAs);
+	acExit->setShortcut(QKeySequence::Quit);
+	acExit->setMenuRole(QAction::QuitRole);
+
+	// icons
+	acNew->setIcon(QIcon::fromTheme("document-new"));
+	acLoad->setIcon(QIcon::fromTheme("document-open"));
+	acSave->setIcon(QIcon::fromTheme("document-save"));
+	acSaveAs->setIcon(QIcon::fromTheme("document-save-as"));
+	acExit->setIcon(QIcon::fromTheme("application-exit"));
+	m_menuOpenRecent->setIcon(QIcon::fromTheme("document-open-recent"));
+	acSaveFigure->setIcon(QIcon::fromTheme("image-x-generic"));
+	acSaveDisp->setIcon(QIcon::fromTheme("text-x-generic"));
+	acSaveMultiDisp->setIcon(QIcon::fromTheme("text-x-generic"));
+	acSaveDispScr->setIcon(QIcon::fromTheme("text-x-script"));
+	acSaveMultiDispScr->setIcon(QIcon::fromTheme("text-x-script"));
+	acStructExportSun->setIcon(QIcon::fromTheme("weather-clear"));
+	acStructExportSW->setIcon(QIcon::fromTheme("text-x-script"));
+	acStructExportScript->setIcon(QIcon::fromTheme("text-x-script"));
+	acStructNotes->setIcon(QIcon::fromTheme("accessories-text-editor"));
+	acStructView->setIcon(QIcon::fromTheme("applications-graphics"));
+	acBZView->setIcon(QIcon::fromTheme("applications-graphics"));
+
+	// calculation options menu
+	QMenu *menuCalcOpt = new QMenu("Calculation Options", m_menu);
+	m_autocalc = new QAction("Automatically Calculate", menuCalcOpt);
+	m_autocalc->setToolTip("Automatically calculate the results.");
+	m_autocalc->setCheckable(true);
+	m_autocalc->setChecked(false);
+	QAction *acCalc = new QAction("Start Calculation", menuCalcOpt);
+	acCalc->setIcon(QIcon::fromTheme("media-playback-start"));
+	acCalc->setToolTip("Calculate all results.");
+	m_use_dmi = new QAction("Use DMI", menuCalcOpt);
+	m_use_dmi->setToolTip("Enables the Dzyaloshinskij-Moriya interaction.");
+	m_use_dmi->setCheckable(true);
+	m_use_dmi->setChecked(true);
+
+	if(m_allow_general_J)
+	{
+		m_use_genJ = new QAction("Use General J", menuCalcOpt);
+		m_use_genJ->setToolTip("Enables the general interaction matrix.");
+		m_use_genJ->setCheckable(true);
+		m_use_genJ->setChecked(true);
+	}
+
+	m_use_field = new QAction("Use External Field", menuCalcOpt);
+	m_use_field->setToolTip("Enables an external field.");
+	m_use_field->setCheckable(true);
+	m_use_field->setChecked(true);
+	m_use_temperature = new QAction("Use Bose Factor", menuCalcOpt);
+	m_use_temperature->setToolTip("Enables the Bose factor.");
+	m_use_temperature->setCheckable(true);
+	m_use_temperature->setChecked(true);
+	m_use_formfact = new QAction("Use Form Factor", menuCalcOpt);
+	m_use_formfact->setToolTip("Enables the magnetic form factor.");
+	m_use_formfact->setCheckable(true);
+	m_use_formfact->setChecked(false);
+	m_use_polcoords = new QAction("Use Blume-Maleev Basis", menuCalcOpt);
+	m_use_polcoords->setToolTip("Uses the Blume-Maleev coordinate basis for polarisation analysis.");
+	m_use_polcoords->setCheckable(true);
+	m_use_polcoords->setChecked(false);
+	m_use_weights = new QAction("Use Neutron Spectral Weights", menuCalcOpt);
+	m_use_weights->setToolTip("Enables calculation of the spin correlation function.");
+	m_use_weights->setCheckable(true);
+	m_use_weights->setChecked(true);
+	m_use_projector = new QAction("Use Neutron Projector", menuCalcOpt);
+	m_use_projector->setToolTip("Enables the neutron orthogonal projector.");
+	m_use_projector->setCheckable(true);
+	m_use_projector->setChecked(true);
+	m_unite_degeneracies = new QAction("Unite Degenerate Energies", menuCalcOpt);
+	m_unite_degeneracies->setToolTip("Unites the weight factors corresponding to degenerate eigenenergies.");
+	m_unite_degeneracies->setCheckable(true);
+	m_unite_degeneracies->setChecked(true);
+	m_ignore_annihilation = new QAction("Ignore Magnon Annihilation", menuCalcOpt);
+	m_ignore_annihilation->setToolTip("Calculate only magnon creation..");
+	m_ignore_annihilation->setCheckable(true);
+	m_ignore_annihilation->setChecked(false);
+	m_force_incommensurate = new QAction("Force Incommensurate", menuCalcOpt);
+	m_force_incommensurate->setToolTip("Enforce incommensurate calculation even for commensurate magnetic structures.");
+	m_force_incommensurate->setCheckable(true);
+	m_force_incommensurate->setChecked(false);
+
+	// H components sub-menu
+	QMenu *menuHamiltonians = new QMenu("Selected Hamiltonians", menuCalcOpt);
+	m_hamiltonian_comp[0] = new QAction("H(Q)", menuHamiltonians);
+	m_hamiltonian_comp[1] = new QAction("H(Q + O)", menuHamiltonians);
+	m_hamiltonian_comp[2] = new QAction("H(Q - O)", menuHamiltonians);
+	for(int i = 0; i < 3; ++i)
+	{
+		m_hamiltonian_comp[i]->setCheckable(true);
+		m_hamiltonian_comp[i]->setChecked(true);
+	}
+	menuHamiltonians->addAction(m_hamiltonian_comp[0]);
+	menuHamiltonians->addAction(m_hamiltonian_comp[1]);
+	menuHamiltonians->addAction(m_hamiltonian_comp[2]);
+
+	// calculation menu
+	QMenu *menuCalc = new QMenu("Calculation", m_menu);
+	QAction *acDisp3D = new QAction("3D Dispersion...", menuCalc);
+	QAction *acTopo = new QAction("Topology...", menuCalc);
+	QAction *acDiff = new QAction("Differentiation...", menuCalc);
+	QAction *acPowder = new QAction("Powder Spectrum...", menuCalc);
+	acDisp3D->setIcon(QIcon::fromTheme("applications-graphics"));
+	//acTopo->setIcon(QIcon::fromTheme("TODO"));
+	//acDiff->setIcon(QIcon::fromTheme("TODO"));
+	acPowder->setIcon(QIcon::fromTheme("weather-snow"));
+
+	// tools menu
+	QMenu *menuTools = new QMenu("Tools", m_menu);
+	QAction *acTrafoCalc = new QAction("Transformations...", menuTools);
+	QAction *acPlot2d = new QAction("2D Plotter...", menuTools);
+	QAction *acPlot3d = new QAction("3D Plotter...", menuTools);
+	QAction *acBZTool = new QAction("Brillouin Zones...", menuTools);
+	QAction *acPolCalc = new QAction("Polarisation Vectors...", menuTools);
+	QAction *acPreferences = new QAction("Preferences...", menuTools);
+
+	acTrafoCalc->setIcon(QIcon::fromTheme("accessories-calculator"));
+	acPlot2d->setIcon(QIcon::fromTheme("x-office-spreadsheet"));
+	acPlot3d->setIcon(QIcon::fromTheme("x-office-spreadsheet"));
+	acPreferences->setIcon(QIcon::fromTheme("preferences-system"));
+	acPreferences->setShortcut(QKeySequence::Preferences);
+	acPreferences->setMenuRole(QAction::PreferencesRole);
+
+	// help menu
+	QMenu *menuHelp = new QMenu("Help", m_menu);
+	QAction *acHelp = new QAction(
+		QIcon::fromTheme("help-contents"),
+		"Show Help...", menuHelp);
+	QAction *acAboutQt = new QAction(
+		QIcon::fromTheme("help-about"),
+		"About Qt...", menuHelp);
+	QAction *acAboutGl = new QAction(
+		QIcon::fromTheme("help-about"),
+		"About Renderer...", menuHelp);
+	QAction *acAbout = new QAction(
+		QIcon::fromTheme("help-about"),
+		"About...", menuHelp);
+
+	acAboutQt->setMenuRole(QAction::AboutQtRole);
+	acAbout->setMenuRole(QAction::AboutRole);
+
+	// actions
+	menuFile->addAction(acNew);
+	menuFile->addSeparator();
+	menuFile->addAction(acLoad);
+	menuFile->addMenu(m_menuOpenRecent);
+	menuFile->addSeparator();
+	menuFile->addAction(acSave);
+	menuFile->addAction(acSaveAs);
+	menuFile->addSeparator();
+	menuFile->addAction(acImportCIF);
+	menuFile->addAction(acImportStructure);
+	menuFile->addMenu(m_menuImportStructRecent);
+	menuFile->addSeparator();
+	menuFile->addAction(acExit);
+
+	menuStruct->addAction(acStructSymIdx);
+	menuStruct->addAction(acStructSortCouplings);
+	menuStruct->addAction(acStructAssignCouplings);
+	menuStruct->addAction(acStructRemoveUnusedCouplings);
+	menuStruct->addSeparator();
+	menuStruct->addAction(acStructNotes);
+	menuStruct->addSeparator();
+	menuStruct->addAction(acStructView);
+	menuStruct->addAction(acBZView);
+#ifdef __TLIBS2_MAGDYN_USE_MINUIT__
+	menuStruct->addSeparator();
+	menuStruct->addAction(acGroundState);
+#endif
+
+	menuExport->addAction(acStructImport);
+	menuExport->addSeparator();
+	menuExport->addAction(acStructExportSun);
+	menuExport->addAction(acStructExportSW);
+	menuExport->addAction(acStructExportScript);
+
+	m_menuDisp->addAction(m_plot_channels);
+	m_menuDisp->addAction(acChannels);
+	m_menuDisp->addAction(m_plot_degeneracies);
+	m_menuDisp->addSeparator();
+	m_menuDisp->addAction(acRescalePlot);
+	m_menuDisp->addMenu(menuWeights);
+	m_menuDisp->addSeparator();
+	m_menuDisp->addAction(acSaveFigure);
+	m_menuDisp->addSeparator();
+	m_menuDisp->addAction(acSaveDisp);
+	m_menuDisp->addAction(acSaveMultiDisp);
+	m_menuDisp->addSeparator();
+	m_menuDisp->addAction(acSaveDispScr);
+	m_menuDisp->addAction(acSaveMultiDispScr);
+
+	menuCalcOpt->addAction(m_autocalc);
+	menuCalcOpt->addAction(acCalc);
+	menuCalcOpt->addSeparator();
+	menuCalcOpt->addAction(m_use_dmi);
+	if(m_allow_general_J)
+		menuCalcOpt->addAction(m_use_genJ);
+	menuCalcOpt->addSeparator();
+	menuCalcOpt->addAction(m_use_field);
+	menuCalcOpt->addAction(m_use_temperature);
+	menuCalcOpt->addAction(m_use_formfact);
+	menuCalcOpt->addSeparator();
+	menuCalcOpt->addAction(m_use_polcoords);
+	menuCalcOpt->addSeparator();
+	menuCalcOpt->addAction(m_use_weights);
+	menuCalcOpt->addAction(m_use_projector);
+	menuCalcOpt->addSeparator();
+	menuCalcOpt->addAction(m_unite_degeneracies);
+	menuCalcOpt->addAction(m_ignore_annihilation);
+	menuCalcOpt->addAction(m_force_incommensurate);
+	menuCalcOpt->addMenu(menuHamiltonians);
+
+	menuCalc->addAction(acDisp3D);
+	menuCalc->addAction(acPowder);
+	menuCalc->addSeparator();
+	menuCalc->addAction(acTopo);
+	menuCalc->addAction(acDiff);
+
+	menuTools->addAction(acTrafoCalc);
+	menuTools->addAction(acPlot2d);
+	menuTools->addAction(acPlot3d);
+	menuTools->addAction(acBZTool);
+	menuTools->addAction(acBZTool);
+	menuTools->addAction(acPolCalc);
+	menuTools->addSeparator();
+	menuTools->addAction(acPreferences);
+
+	menuHelp->addAction(acHelp);
+	menuHelp->addSeparator();
+	menuHelp->addAction(acAboutQt);
+	menuHelp->addAction(acAboutGl);
+	menuHelp->addSeparator();
+	menuHelp->addAction(acAbout);
+
+	// signals
+	connect(acNew, &QAction::triggered, [this]() { Clear(true); } );
+	connect(acLoad, &QAction::triggered,
+		this, static_cast<void (MagDynDlg::*)()>(&MagDynDlg::Load));
+	connect(acImportCIF, &QAction::triggered,
+		this, static_cast<void (MagDynDlg::*)()>(&MagDynDlg::ImportCIF));
+	connect(acImportStructure, &QAction::triggered,
+		this, static_cast<void (MagDynDlg::*)()>(&MagDynDlg::ImportStructure));
+	connect(acSave, &QAction::triggered,
+		this, static_cast<void (MagDynDlg::*)()>(&MagDynDlg::Save));
+	connect(acSaveAs, &QAction::triggered,
+		this, static_cast<void (MagDynDlg::*)()>(&MagDynDlg::SaveAs));
+	connect(acExit, &QAction::triggered, this, &QDialog::close);
+
+	connect(acSaveFigure, &QAction::triggered, this, &MagDynDlg::SavePlotFigure);
+	connect(acSaveDisp, &QAction::triggered,
+		[this](){ this->SaveDispersion(false); });
+	connect(acSaveMultiDisp, &QAction::triggered,
+		[this](){ this->SaveMultiDispersion(false); });
+	connect(acSaveDispScr, &QAction::triggered,
+		[this](){ this->SaveDispersion(true); });
+	connect(acSaveMultiDispScr, &QAction::triggered,
+		[this](){ this->SaveMultiDispersion(true); });
+
+	connect(acRescalePlot, &QAction::triggered, [this]()
+	{
+		if(!m_plot)
+			return;
+
+		m_plot->rescaleAxes();
+		m_plot->replot();
+	});
+
+	auto calc_all = [this]()
+	{
+		if(this->m_autocalc->isChecked())
+			this->CalcAll();
+	};
+
+	auto calc_all_dyn = [this]()
+	{
+		if(this->m_autocalc->isChecked())
+		{
+			this->CalcDispersion();
+			this->CalcHamiltonian();
+		}
+	};
+
+	connect(acStructNotes, &QAction::triggered, this, &MagDynDlg::ShowNotesDlg);
+	connect(acStructSymIdx, &QAction::triggered, this, &MagDynDlg::CalcSymmetryIndices);
+	connect(acStructSortCouplings, &QAction::triggered, this, &MagDynDlg::SortTerms);
+	connect(acStructRemoveUnusedCouplings, &QAction::triggered, this, &MagDynDlg::RemoveUnusedTerms);
+	connect(acStructAssignCouplings, &QAction::triggered, this, &MagDynDlg::ShowAssignDlg);
+	connect(acStructView, &QAction::triggered, this, &MagDynDlg::ShowStructPlotDlg);
+	connect(acBZView, &QAction::triggered, this, &MagDynDlg::ShowBZ3DDlg);
+	connect(acGroundState, &QAction::triggered, this, &MagDynDlg::ShowGroundStateDlg);
+	connect(acDisp3D, &QAction::triggered, this, &MagDynDlg::ShowDispersion3DDlg);
+	connect(acTopo, &QAction::triggered, this, &MagDynDlg::ShowTopologyDlg);
+	connect(acDiff, &QAction::triggered, this, &MagDynDlg::ShowDiffDlg);
+	connect(acPowder, &QAction::triggered, this, &MagDynDlg::ShowPowderDlg);
+	connect(acStructImport, &QAction::triggered, this, &MagDynDlg::ShowTableImporter);
+	connect(acStructExportSun, &QAction::triggered,
+		this, static_cast<void (MagDynDlg::*)()>(&MagDynDlg::ExportToSunny));
+	connect(acStructExportSW, &QAction::triggered,
+		this, static_cast<void (MagDynDlg::*)()>(&MagDynDlg::ExportToSpinW));
+	connect(acStructExportScript, &QAction::triggered,
+		this, static_cast<void (MagDynDlg::*)()>(&MagDynDlg::ExportToScript));
+	if(m_allow_general_J)
+		connect(m_use_genJ, &QAction::toggled, calc_all);
+
+	for(QAction* action : { m_use_dmi, m_use_field, m_use_temperature,
+		m_use_formfact, m_use_polcoords })
+	{
+		connect(action, &QAction::toggled, calc_all);
+	}
+
+	for(QAction* action : { m_use_weights, m_use_projector,
+		m_unite_degeneracies, m_ignore_annihilation, m_force_incommensurate })
+	{
+		connect(action, &QAction::toggled, calc_all_dyn);
+	}
+
+	connect(m_autocalc, &QAction::toggled, [this](bool checked)
+	{
+		if(checked)
+			this->CalcAll();
+	});
+
+	connect(acChannels, &QAction::triggered, [this]()
+	{
+		ShowMatrixElemsDlg(false);
+	});
+
+	connect(m_plot_channels, &QAction::toggled, [this, acChannels](bool checked)
+	{
+		acChannels->setEnabled(checked);
+		this->PlotDispersion();
+	});
+
+	for(int i = 0; i < 3; ++i)
+		connect(m_hamiltonian_comp[i], &QAction::toggled, calc_all_dyn);
+
+	connect(m_plot_degeneracies, &QAction::toggled, [this](bool)
+	{
+		this->PlotDispersion();
+	});
+
+	connect(m_plot_weights_pointsize, &QAction::toggled, [this](bool)
+	{
+		this->PlotDispersion();
+	});
+	connect(m_plot_weights_alpha, &QAction::toggled, [this](bool)
+	{
+		this->PlotDispersion();
+	});
+
+	connect(acCalc, &QAction::triggered, [this]()
+	{
+		this->CalcAll();
+	});
+
+	// show trafo calculator dialog
+	connect(acTrafoCalc, &QAction::triggered, [this]()
+	{
+		if(!m_trafos)
+		{
+			m_trafos = new TrafoCalculator(this, m_sett);
+			m_trafos->SetKernel(&m_dyn);
+		}
+
+		m_trafos->show();
+		m_trafos->raise();
+		m_trafos->activateWindow();
+	});
+
+	// show general 2d plotter dialog
+	connect(acPlot2d, &QAction::triggered, [this]()
+	{
+		if(!m_plot2d)
+			m_plot2d = new Plot2DDlg(this, m_sett);
+
+		m_plot2d->show();
+		m_plot2d->raise();
+		m_plot2d->activateWindow();
+	});
+
+	// show general 3d plotter dialog
+	connect(acPlot3d, &QAction::triggered, [this]()
+	{
+		if(!m_plot3d)
+		{
+			m_plot3d = new Plot3DDlg(this, m_sett);
+			connect(m_plot3d, &Plot3DDlg::GlDeviceInfos,
+				m_glinfo_dlg, &GlInfoDlg::SetGlDeviceInfos);
+		}
+
+		m_plot3d->show();
+		m_plot3d->raise();
+		m_plot3d->activateWindow();
+	});
+
+	// show brillouin zone dialog
+	connect(acBZTool, &QAction::triggered, [this]()
+	{
+		if(!m_bz_tool)
+			m_bz_tool = new BZDlg(this/*, m_sett*/);
+
+		m_bz_tool->show();
+		m_bz_tool->raise();
+		m_bz_tool->activateWindow();
+	});
+
+	// show polarisation calculator dialog
+	connect(acPolCalc, &QAction::triggered, [this]()
+	{
+		if(!m_pol)
+		{
+			m_pol = new PolDlg(this, m_sett);
+			connect(m_pol, &PolDlg::GlDeviceInfos,
+				m_glinfo_dlg, &GlInfoDlg::SetGlDeviceInfos);
+		}
+
+		m_pol->show();
+		m_pol->raise();
+		m_pol->activateWindow();
+	});
+
+	// show preferences dialog
+	connect(acPreferences, &QAction::triggered, this, &MagDynDlg::ShowSettingsDlg);
+
+	// show info dialog
+	connect(acHelp, &QAction::triggered, [this]()
+	{
+		QUrl url("https://github.com/ILLGrenoble/magpie/wiki");
+		if(!QDesktopServices::openUrl(url))
+			ShowError("Could not open the wiki.");
+	});
+
+	// show info dialogs
+	connect(acAboutQt, &QAction::triggered, []() { qApp->aboutQt(); });
+	connect(acAboutGl, &QAction::triggered, this, &MagDynDlg::ShowGlInfoDlg);
+	connect(acAbout, &QAction::triggered, this, &MagDynDlg::ShowInfoDlg);
+
+	// menu bar
+	m_menu->addMenu(menuFile);
+	m_menu->addMenu(menuStruct);
+	m_menu->addMenu(m_menuDisp);
+	m_menu->addMenu(menuCalcOpt);
+	m_menu->addMenu(menuCalc);
+	m_menu->addMenu(menuExport);
+	m_menu->addMenu(menuTools);
+	m_menu->addMenu(menuHelp);
+	m_maingrid->setMenuBar(m_menu);
+}
+
+
+
+void MagDynDlg::mousePressEvent(QMouseEvent *evt)
+{
+	QDialog::mousePressEvent(evt);
+}
+
+
+
+/**
+ * dialog is closing
+ */
+void MagDynDlg::closeEvent(QCloseEvent *)
+{
+	if(!m_sett)
+		return;
+
+	m_recent.TrimEntries();
+	m_sett->setValue("recent_files", m_recent.GetRecentFiles());
+
+	m_recent_struct.TrimEntries();
+	m_sett->setValue("recent_struct_files", m_recent_struct.GetRecentFiles());
+
+	m_sett->setValue("geo", saveGeometry());
+
+	if(m_split_inout)
+		m_sett->setValue("splitter", m_split_inout->saveState());
+}
+
+
+
+/**
+ * a file is being dragged over the window
+ */
+void MagDynDlg::dragEnterEvent(QDragEnterEvent *evt)
+{
+	if(evt)
+		evt->accept();
+}
+
+
+
+/**
+ * a file is being dropped onto the window
+ */
+void MagDynDlg::dropEvent(QDropEvent *evt)
+{
+	const QMimeData *mime = evt->mimeData();
+	if(!mime)
+		return;
+
+	for(const QUrl& url : mime->urls())
+	{
+		if(!url.isLocalFile())
+			continue;
+
+		Load(url.toLocalFile());
+		evt->accept();
+		break;
+	}
+}
+
+
+
+/**
+ * refresh and calculate everything
+ */
+void MagDynDlg::CalcAll()
+{
+	// calculate structure
+	SyncToKernel();
+	if(m_structplot_dlg)
+		m_structplot_dlg->Sync();
+
+	// calculate brillouin zone if needed
+	if(m_needsBZCalc)
+	{
+		CalcBZ();
+		DispersionQChanged(false);
+	}
+
+	// calculate dynamics
+	CalcDispersion();
+	CalcHamiltonian();
+}
+
+
+
+/**
+ * enable (or disable) GUI inputs after calculation threads have finished
+ */
+void MagDynDlg::EnableInput(bool enable)
+{
+	m_inputEnabled = enable;
+
+	if(enable)
+	{
+		m_tabs_in->setEnabled(true);
+		m_tabs_out->setEnabled(true);
+		m_menu->setEnabled(true);
+
+		m_btnStartStop->setText("Calculate");
+		m_btnStartStop->setToolTip("Start calculation.");
+		m_btnStartStop->setIcon(QIcon::fromTheme("media-playback-start"));
+	}
+	else
+	{
+		m_menu->setEnabled(false);
+		m_tabs_out->setEnabled(false);
+		m_tabs_in->setEnabled(false);
+
+		m_btnStartStop->setText("Stop");
+		m_btnStartStop->setToolTip("Stop calculation.");
+		m_btnStartStop->setIcon(QIcon::fromTheme("media-playback-stop"));
+	}
+}
+
+
+
+void MagDynDlg::ShowError(const QString& msg, bool critical) const
+{
+	MagDynDlg *dlg = const_cast<MagDynDlg*>(this);
+
+	if(critical)
+		QMessageBox::critical(dlg, windowTitle() + " -- Error", msg);
+	else
+		QMessageBox::warning(dlg, windowTitle() + " -- Warning", msg);
+}
+
+
+void MagDynDlg::ShowError(const char* msg, bool critical) const
+{
+	ShowError(QString(msg), critical);
+}

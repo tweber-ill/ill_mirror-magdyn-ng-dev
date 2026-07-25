@@ -1,0 +1,356 @@
+/**
+ * magnetic dynamics -- spin-spin correlation
+ * @author Tobias Weber <tweber@ill.fr>
+ * @date 2022 - 2026
+ * @license GPLv3, see 'LICENSE' file
+ *
+ * References:
+ *   - (Toth 2015) S. Toth and B. Lake, J. Phys.: Condens. Matter 27 166002 (2015):
+ *                 https://doi.org/10.1088/0953-8984/27/16/166002
+ *                 https://arxiv.org/abs/1402.6069
+ *   - (McClarty 2022) https://doi.org/10.1146/annurev-conmatphys-031620-104715
+ *   - (Heinsdorf 2021) N. Heinsdorf, manual example calculation for a simple
+ *                      ferromagnetic case, personal communications, 2021/2022.
+ *
+ * @desc This file implements the formalism given by (Toth 2015).
+ * @desc For further references, see the 'LITERATURE' file.
+ *
+ * ----------------------------------------------------------------------------
+ * Magpie
+ * Copyright (C) 2022-2026  Tobias WEBER (Institut Laue-Langevin (ILL),
+ *                          Grenoble, France).
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, version 3 of the License.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ * ----------------------------------------------------------------------------
+ */
+
+#ifndef __TLIBS2_MAGDYN_CORREL_H__
+#define __TLIBS2_MAGDYN_CORREL_H__
+
+
+#include "../algos.h"
+#include "../phys.h"
+
+#include "magdyn.h"
+
+
+// --------------------------------------------------------------------
+// calculation functions
+// --------------------------------------------------------------------
+
+/**
+ * get the dynamical structure factor from a hamiltonian
+ * @note implements the formalism given by (Toth 2015)
+ */
+MAGDYN_TEMPL
+bool MAGDYN_INST::CalcCorrelationsFromHamiltonian(MAGDYN_TYPE::SofQE& S) const
+{
+	using namespace tl2_ops;
+
+	const t_size N = GetMagneticSitesCount();
+	if(N == 0)
+		return false;
+
+	SortByEnergies(S);  // in descending order
+
+	// create a matrix of eigenvectors
+	std::vector<t_vec> evecs;
+	evecs.reserve(S.E_and_S.size());
+	for(t_size idx = 0; idx < S.E_and_S.size(); ++idx)
+		evecs.push_back(S.E_and_S[idx].state);
+	S.evec_mat = tl2::create<t_mat>(evecs);
+
+	if(m_perform_checks)
+	{
+		// check commutator relations, see before equ. 7 in (McClarty 2022)
+		//t_mat check_comm = S.evec_mat * S.comm * tl2::herm(S.evec_mat);
+		t_mat check_comm = S.evec_mat * tl2::herm(S.evec_mat);
+		if(!tl2::equals(/*S.comm*/ tl2::unit<t_mat>(2*N), check_comm, m_eps))
+		{
+			TL2_CERR_OPT << "Magdyn error: Wrong commutator at Q = "
+				<< S.Q_rlu << ": " << check_comm
+				<< "." << std::endl;
+		}
+	}
+
+	// equation (32) from (Toth 2015)
+	const t_mat energy_mat = tl2::herm(S.evec_mat) * S.H_comm * S.evec_mat;  // energies
+
+#ifdef __TLIBS2_MAGDYN_DEBUG_OUTPUT__
+	std::cout << "E_mat =\n";
+	tl2::niceprint(std::cout, energy_mat, 1e-4, 4);
+#endif
+
+	// check that the energy matrix is diagonal
+	if(m_perform_checks && !tl2::is_diag(energy_mat, m_eps))
+	{
+		TL2_CERR_OPT << "Magdyn error: Energy matrix is not diagonal at Q = "
+			<< S.Q_rlu << ": " << energy_mat
+			<< "." << std::endl;
+	}
+
+	t_mat E_sqrt = S.comm * energy_mat;        // abs. energies
+	for(t_size i = 0; i < E_sqrt.size1(); ++i)
+		E_sqrt(i, i) = std::sqrt(E_sqrt(i, i));  // sqrt. of abs. energies
+
+	if(energy_mat.size1() != S.E_and_S.size())
+	{
+		TL2_CERR_OPT << "Magdyn warning: Expected " << S.E_and_S.size() << " energies at Q = "
+			<< S.Q_rlu << ", but got " << energy_mat.size1() << " energies"
+			<< "." << std::endl;
+
+		S.E_and_S.resize(energy_mat.size1());
+	}
+
+	// re-create energies, to be consistent with the weights
+	for(t_size i = 0; i < energy_mat.size1(); ++i)
+	{
+		if(m_perform_checks && !tl2::equals_0(energy_mat(i, i).imag(), m_eps))
+		{
+			TL2_CERR_OPT << "Magdyn warning: Remaining imaginary energy component at Q = "
+				<< S.Q_rlu << " and E = " << energy_mat(i, i)
+				<< "." << std::endl;
+		}
+
+		if(m_perform_checks && !tl2::equals(energy_mat(i, i).real(), S.E_and_S[i].E, m_eps))
+		{
+			TL2_CERR_OPT << "Magdyn warning: Mismatching energy at Q = "
+				<< S.Q_rlu << " and E = " << energy_mat(i, i).real()
+				<< ", expected E = " << S.E_and_S[i].E
+				<< "." << std::endl;
+		}
+
+		S.E_and_S[i].E = energy_mat(i, i).real();
+		S.E_and_S[i].S = tl2::zero<t_mat>(3, 3);
+		S.E_and_S[i].S_perp = tl2::zero<t_mat>(3, 3);
+	}
+
+	const auto [H_triag_inv, inv_ok] = tl2::inv(S.H_triag);
+	if(!inv_ok)
+	{
+		TL2_CERR_OPT << "Magdyn error: Inversion of triangulised Hamiltonian failed"
+			<< " at Q = " << S.Q_rlu << "." << std::endl;
+		return false;
+	}
+
+	// equation (34) from (Toth 2015)
+	const t_mat boson_ops = H_triag_inv * S.evec_mat * E_sqrt;
+	const t_mat boson_ops_herm = tl2::herm(boson_ops);
+
+#ifdef __TLIBS2_MAGDYN_DEBUG_OUTPUT__
+	t_mat D_mat = boson_ops_herm * S.H_comm * boson_ops;
+	std::cout << "D =\n";
+	tl2::niceprint(std::cout, D_mat, 1e-4, 4);
+	std::cout << "E_sqrt =\n";
+	tl2::niceprint(std::cout, E_sqrt, 1e-4, 4);
+	std::cout << "L_energy =\n";
+	tl2::niceprint(std::cout, energy_mat, 1e-4, 4);
+	std::cout << "boson_ops =\n";
+	tl2::niceprint(std::cout, boson_ops, 1e-4, 4);
+#endif
+
+	// calculate form factors per site (or uniformly for all if only one is given)
+	std::vector<tl2::ExprParser<t_cplx>> magffacts = m_magffacts;
+	std::vector<t_cplx> ffacts;
+	ffacts.reserve(magffacts.size());
+	for(t_size ffact_idx = 0; ffact_idx < magffacts.size(); ++ffact_idx)
+	{
+		if(!magffacts[ffact_idx])
+		{
+			// use 1 in case the form factor formula is invalid
+			ffacts.push_back(1.);
+
+			if(magffacts[ffact_idx].GetExprString() != "")
+			{
+				TL2_CERR_OPT << "Magdyn error: Invalid form factor #"
+					<< ffact_idx << " at Q = " << S.Q_rlu << ", "
+					<< "formula: \"" << magffacts[ffact_idx].GetExprString() << "\"."
+					<< std::endl;
+			}
+			continue;
+		}
+
+		// get |Q| in units of A^(-1)
+		t_real Q_abs = tl2::norm<t_vec_real>(S.Q_invA);
+
+		// evaluate form factor expression
+		magffacts[ffact_idx].register_var("Q", Q_abs);
+		magffacts[ffact_idx].register_var("Q2", Q_abs*Q_abs);
+		magffacts[ffact_idx].register_var("s", Q_abs / (2.*s_twopi));
+		magffacts[ffact_idx].register_var("s2", std::pow(Q_abs / (2.*s_twopi), 2.));
+		ffacts.push_back(magffacts[ffact_idx].eval_noexcept());
+
+		//std::cout << "ffact(Q = |" << S.Q_rlu << "| rlu = " << Q_abs << " / A) = " << ffacts[ffact_idx] << std::endl;
+	}
+
+	// building the spin correlation functions of equation (47) from (Toth 2015)
+	for(std::uint8_t x_idx = 0; x_idx < 3; ++x_idx)
+	for(std::uint8_t y_idx = 0; y_idx < 3; ++y_idx)
+	{
+		// equations (44) and (47) from (Toth 2015)
+		t_mat M = tl2::create<t_mat>(2*N, 2*N);
+
+		for(t_size i = 0; i < N; ++i)
+		{
+			// get the outer site
+			const MagneticSite& s_i = GetMagneticSite(i);
+
+			// get the pre-calculated u vectors
+			const t_vec& u_i = s_i.ge_trafo_plane_calc;
+			const t_vec& uc_i = s_i.ge_trafo_plane_conj_calc;
+
+			// magnetic form factor for site i
+			t_cplx ffact_i = 1., ffactc_i = 1.;
+			if(s_i.ffact_idx && *s_i.ffact_idx < ffacts.size())
+			{
+				ffact_i = ffacts[*s_i.ffact_idx];
+				ffactc_i = std::conj(ffacts[*s_i.ffact_idx]);
+			}
+
+			for(t_size j = 0; j < N; ++j)
+			{
+				// get the inner site
+				const MagneticSite& s_j = GetMagneticSite(j);
+
+				// get the pre-calculated u vectors
+				const t_vec& u_j = s_j.ge_trafo_plane_calc;
+				const t_vec& uc_j = s_j.ge_trafo_plane_conj_calc;
+
+				// magnetic form factor for site j
+				t_cplx ffact_j = 1., ffactc_j = 1.;
+				if(s_j.ffact_idx && *s_j.ffact_idx < ffacts.size())
+				{
+					ffact_j = ffacts[*s_j.ffact_idx];
+					ffactc_j = std::conj(ffacts[*s_j.ffact_idx]);
+				}
+
+				// pre-factors of equation (44) from (Toth 2015)
+				const t_real S_mag = std::sqrt(s_i.spin_mag_calc * s_j.spin_mag_calc);
+				const t_cplx phase = std::exp(-m_phase_sign * s_imag * s_twopi *
+					tl2::inner<t_vec_real>(s_j.pos_calc - s_i.pos_calc, S.Q_rlu));
+				if(m_perform_checks)
+				{
+					// because A*B^T = diag(2pi), the phase is the same as:
+					const t_cplx phase_chk = std::exp(-m_phase_sign * s_imag *
+						tl2::inner<t_vec_real>(m_xtalA*s_j.pos_calc - m_xtalA*s_i.pos_calc, S.Q_invA));
+
+					if(!tl2::equals<t_cplx>(phase, phase_chk, m_eps))
+					{
+						TL2_CERR_OPT << "Magdyn error: Wrong phase at Q = "
+							<< S.Q_rlu << ": " << phase << " != " << phase_chk
+							<< "." << std::endl;
+					}
+				}
+
+				// matrix elements of equation (44) from (Toth 2015)
+				M(    i,     j) = ffact_i * ffactc_j  * phase * S_mag * u_i[x_idx]  * uc_j[y_idx];  // b_i+ b_j terms
+				M(    i, N + j) = ffact_i * ffact_j   * phase * S_mag * u_i[x_idx]  * u_j[y_idx];   // b_i+ b_j+ terms
+				M(N + i,     j) = ffactc_i * ffactc_j * phase * S_mag * uc_i[x_idx] * uc_j[y_idx];  // b_i b_j terms
+				M(N + i, N + j) = ffactc_i * ffact_j  * phase * S_mag * uc_i[x_idx] * u_j[y_idx];   // b_i b_j+ terms
+			}  // end of inner site iteration
+		}  // end of outer site iteration
+
+		// multiply with boson operators
+		const t_mat M_xy = boson_ops_herm * M * boson_ops;
+
+#ifdef __TLIBS2_MAGDYN_DEBUG_OUTPUT__
+		std::cout << "M_{" << int(x_idx) << ", " << int(y_idx) << "}:\n";
+		tl2::niceprint(std::cout, M_xy, 1e-4, 4);
+#endif
+
+		for(t_size i = 0; i < S.E_and_S.size(); ++i)
+			S.E_and_S[i].S(x_idx, y_idx) += M_xy(i, i) / t_real(M.size1());
+	} // end of coordinate iteration
+
+	return true;
+}
+
+
+
+/**
+ * applies projectors, form and weight factors to get neutron intensities
+ * @note implements the formalism given by (Toth 2015)
+ */
+MAGDYN_TEMPL
+void MAGDYN_INST::CalcIntensities(MAGDYN_TYPE::SofQE& S) const
+{
+	using namespace tl2_ops;
+
+	for(EnergyAndWeight& E_and_S : S.E_and_S)
+	{
+		// apply bose factor
+		if(m_temperature >= 0.)
+			E_and_S.S *= tl2::bose_cutoff(E_and_S.E, m_temperature, m_bose_cutoff);
+
+		// calculate orthogonal projector for magnetic neutron scattering,
+		// see (Shirane 2002), p. 37, equation (2.64)
+		t_mat proj_neutron;
+		if(!tl2::equals_0(S.Q_invA, m_eps))
+		{
+			proj_neutron = tl2::convert<t_mat>(
+				tl2::ortho_projector<t_mat_real, t_vec_real>(S.Q_invA, false));
+		}
+		else
+		{
+			// invalid projector at Q = 0
+			proj_neutron = tl2::zero<t_mat>(3, 3);
+			TL2_CERR_OPT << "Magdyn error: Cannot calculate orthogonal projector for Q = 0." << std::endl;
+		}
+
+		// apply orthogonal projector
+		E_and_S.S_perp = proj_neutron * E_and_S.S;
+		if(m_perform_checks && !tl2::equals(tl2::trace(E_and_S.S_perp), tl2::trace(E_and_S.S_perp * proj_neutron), m_eps))
+		{
+			TL2_CERR_OPT << "Magdyn error: Wrong S_perp at Q = " << S.Q_rlu << ":";
+			TL2_CERR_OPT << "\nproj * S =\n";
+			if(!m_silent)
+				tl2::niceprint(std::cerr, E_and_S.S_perp, 1e-4, 4);
+			TL2_CERR_OPT << "\nproj * S * proj =\n";
+			if(!m_silent)
+				tl2::niceprint(std::cerr, E_and_S.S_perp * proj_neutron, 1e-4, 4);
+			TL2_CERR_OPT << std::endl;
+		}
+
+
+#ifdef __TLIBS2_MAGDYN_DEBUG_OUTPUT__
+		t_mat proj_neutron2 = tl2::convert<t_mat>(
+			tl2::ortho_projector<t_mat_real, t_vec_real>(m_xtalB, S.Q_rlu, false, false));
+
+		std::cout << "Q_proj for Q = " << S.Q_rlu << ":\n";
+		tl2::niceprint(std::cout, proj_neutron, 1e-4, 4);
+		std::cout << "Q_proj2 for Q = " << S.Q_rlu << ":\n";
+		tl2::niceprint(std::cout, proj_neutron2, 1e-4, 4);
+		std::cout << "\n";
+#endif
+
+		// weights
+		E_and_S.S_sum       = tl2::trace<t_mat>(E_and_S.S);
+		E_and_S.S_perp_sum  = tl2::trace<t_mat>(E_and_S.S_perp);
+		E_and_S.weight_full = std::abs(E_and_S.S_sum.real());
+		E_and_S.weight_perp = std::abs(E_and_S.S_perp_sum.real());
+#ifdef MAGDYN_COMPAT
+		E_and_S.weight      = E_and_S.weight_perp;
+#endif
+
+		if(m_calc_pol && CalcPolarisation(S.Q_rlu, E_and_S))
+		{
+			E_and_S.S_pol_sum       = tl2::trace<t_mat>(E_and_S.S_pol);
+			E_and_S.S_pol_perp_sum  = tl2::trace<t_mat>(E_and_S.S_pol_perp);
+			E_and_S.weight_pol_full = std::abs(E_and_S.S_pol_sum.real());
+			E_and_S.weight_pol_perp = std::abs(E_and_S.S_pol_perp_sum.real());
+		}
+	}
+}
+// --------------------------------------------------------------------
+
+#endif

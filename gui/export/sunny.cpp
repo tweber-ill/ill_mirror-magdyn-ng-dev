@@ -1,0 +1,574 @@
+/**
+ * magnetic dynamics -- exporting the magnetic structure to other magnon tools
+ * @author Tobias Weber <tweber@ill.fr>
+ * @date 26-june-2024
+ * @license GPLv3, see 'LICENSE' file
+ *
+ * ----------------------------------------------------------------------------
+ * magpie & mag-core
+ * Copyright (C) 2018-2026  Tobias WEBER (Institut Laue-Langevin (ILL),
+ *                          Grenoble, France).
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, version 3 of the License.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ * ----------------------------------------------------------------------------
+ */
+
+#include <boost/scope_exit.hpp>
+#include <boost/property_tree/xml_parser.hpp>
+namespace pt = boost::property_tree;
+
+#include "../magdyn.h"
+
+#include <QtCore/QString>
+
+#include <fstream>
+#include <unordered_set>
+#include <cstdlib>
+
+#include "libs/str.h"
+#include "libs/units.h"
+#include "libs/symops.h"
+
+
+// precision
+extern int g_prec;
+extern t_real g_eps;
+
+
+extern std::string get_str_var(const std::string& var, bool add_brackets = false);
+
+
+
+/**
+ * export the magnetic structure to the sunny tool
+ *   (https://github.com/SunnySuite/Sunny.jl)
+ */
+void MagDynDlg::ExportToSunny()
+{
+	QString dirLast = m_sett->value("dir_export_sun", "").toString();
+	QString filename = QFileDialog::getSaveFileName(
+		this, "Save As Jl File", dirLast, "jl files (*.jl)");
+	if(filename == "")
+		return;
+
+	if(ExportToSunny(filename))
+		m_sett->setValue("dir_export_sun", QFileInfo(filename).path());
+}
+
+
+
+/**
+ * export the magnetic structure to the sunny tool
+ *   (https://github.com/SunnySuite/Sunny.jl)
+ */
+bool MagDynDlg::ExportToSunny(const QString& _filename)
+{
+	// make sure the symmetry indices are up-to-date
+	CalcSymmetryIndices();
+
+	std::string filename = _filename.toStdString();
+	std::string dispname_abs = tl2::get_file_noext(filename) + ".dat";
+	std::string dispname_rel = tl2::get_file_nodir(dispname_abs);
+
+	std::ofstream ofstr(filename);
+	if(!ofstr)
+	{
+		ShowError(QString("Cannot open file \"%1\" for writing.").arg(filename.c_str()));
+		return false;
+	}
+
+	ofstr.precision(g_prec);
+
+	const char* user = std::getenv("USER");
+	if(!user)
+		user = "";
+
+	ofstr	<< "#\n"
+		<< "# Created by Magpie " << MAGPIE_VER << "\n"
+		<< "# Author: Tobias Weber\n"
+		<< "# URL: https://github.com/ILLGrenoble/magpie\n"
+		<< "# DOI: https://doi.org/10.5281/zenodo.16180814\n"
+		<< "# User: " << user << "\n"
+		<< "# Date: " << tl2::epoch_to_str<t_real>(tl2::epoch<t_real>()) << "\n"
+		<< "#\n\n";
+
+	ofstr << "using Sunny\nusing Printf\nusing LinearAlgebra\n";
+
+
+	// --------------------------------------------------------------------
+	ofstr << "\n# options\n";
+	ofstr << "use_spacegroup   = false  # careful: the generated site order may be different!\n";
+	ofstr << "calc_groundstate = false\n";
+	ofstr << "plot_structure   = true\n";
+	ofstr << "plot_dynamics    = true\n";
+	ofstr << "save_dynamics    = true\n";
+	if(m_dyn.IsIncommensurate())
+		ofstr << "use_supercell    = false\n";
+	ofstr << "datfile          = \"" << dispname_rel << "\"\n";
+	ofstr << "phys_units       = Units(:meV, :angstrom)\n";
+	// --------------------------------------------------------------------
+
+
+	// --------------------------------------------------------------------
+	t_real h1 = (t_real)m_Q_start[0]->value();
+	t_real k1 = (t_real)m_Q_start[1]->value();
+	t_real l1 = (t_real)m_Q_start[2]->value();
+	t_real h2 = (t_real)m_Q_end[0]->value();
+	t_real k2 = (t_real)m_Q_end[1]->value();
+	t_real l2 = (t_real)m_Q_end[2]->value();
+	t_real peak1x = (t_real)m_scatteringplane[0]->value();
+	t_real peak1y = (t_real)m_scatteringplane[1]->value();
+	t_real peak1z = (t_real)m_scatteringplane[2]->value();
+	t_real peak2x = (t_real)m_scatteringplane[3]->value();
+	t_real peak2y = (t_real)m_scatteringplane[4]->value();
+	t_real peak2z = (t_real)m_scatteringplane[5]->value();
+
+	// principal scan direction
+	t_size q_idx = 1;
+	if(std::abs(k2 - k1) > std::abs(h2 - h1))
+		q_idx = 2;
+	if(std::abs(l2 - l1) > std::abs(k2 - k1))
+		q_idx = 3;
+
+	// internal constants and variables
+	ofstr << "\n# variables\n";
+	ofstr << "g_e    = " << tl2::g_e<t_real> << "\n";
+	ofstr << "Qstart = [ " << h1 << ", " << k1 << ", " << l1 << " ]\n";
+	ofstr << "Qend   = [ " << h2 << ", " << k2 << ", " << l2 << " ]\n";
+	ofstr << "Qpts   = " << m_num_points->value() << "\n";
+	ofstr << "plane1 = [ " << peak1x << ", " << peak1y << ", " << peak1z << " ]\n";
+	ofstr << "plane2 = [ " << peak2x << ", " << peak2y << ", " << peak2z << " ]\n";
+	ofstr << "eps    = " << g_eps << "\n";
+
+	// user (model) variables
+	if(m_dyn.GetVariables().size())
+		ofstr << "\n# model parameters\n";
+	for(const auto &var : m_dyn.GetVariables())
+	{
+		ofstr << var.name << " = " << var.value.real();
+		if(!tl2::equals_0<t_real>(var.value.imag(), g_eps))
+			ofstr << " + var.value.imag()" << "im";
+		ofstr << "\n";
+	}
+	// --------------------------------------------------------------------
+
+
+	ofstr << "\n\nfunction eps_to_0(val)\n";
+	ofstr << "if abs(val) < eps\n";
+	ofstr << "\treturn 0\n";
+	ofstr << "end\n";
+	ofstr << "\treturn val\n";
+	ofstr << "end\n";
+
+
+	// --------------------------------------------------------------------
+	ofstr << "\n\n# magnetic sites and xtal lattice\n";
+	ofstr << "@printf(\"Setting up magnetic sites...\\n\")\n";
+
+	// save as the P1 space group, as we have already performed the symmetry operations
+	// (you can also manually set the crystal's space group and delete all
+	//  symmetry-equivalent positions and couplings in the generated file)
+	int sgnum = m_comboSG->itemData(m_comboSG->currentIndex(), Qt::UserRole + 1).toInt();
+	ofstr << "sgnum = 1  # P1 -> manual generation of sites and couplings\n";
+	ofstr << "if use_spacegroup\n";
+	ofstr << "\tsgnum = " << sgnum << "\n";
+	ofstr << "end\n\n";
+
+
+	auto gen_sites = [this, &ofstr](bool skip_seen)
+	{
+		const auto& xtal = m_dyn.GetCrystalLattice();
+
+		ofstr << "\tmagsites = Crystal(\n"
+			<< "\t\tlattice_vectors("
+			<< xtal[0] << ", " << xtal[1] << ", " << xtal[2] << ", "
+			<< tl2::r2d<t_real>(xtal[3]) << ", "
+			<< tl2::r2d<t_real>(xtal[4]) << ", "
+			<< tl2::r2d<t_real>(xtal[5]) << "),\n\t\t[\n";
+
+		ofstr << "\t\t\t# site list\n";
+		std::unordered_set<t_size> seen_site_sym_indices;
+		for(const t_site &site : m_dyn.GetMagneticSites())
+		{
+			bool seen = (seen_site_sym_indices.find(site.sym_idx) != seen_site_sym_indices.end());
+			if(!seen)
+				seen_site_sym_indices.insert(site.sym_idx);
+			if(seen && skip_seen)
+				continue;
+
+			ofstr << "\t\t\t[ "
+				<< get_str_var(site.pos[0]) << ", "
+				<< get_str_var(site.pos[1]) << ", "
+				<< get_str_var(site.pos[2]) << " ],"
+				<< " # " << site.name << ", sym_idx = " << site.sym_idx << "\n";
+		}
+
+		ofstr << "\t\t], sgnum)\n\n";
+
+
+		ofstr << "\t# spin magnitudes and magnetic system\n";
+		ofstr << "\tmagsys = System(magsites, #( 1, 1, 1 ),\n\t\t[\n";
+
+		t_size site_idx = 1;
+		seen_site_sym_indices.clear();
+		for(const t_site& site : m_dyn.GetMagneticSites())
+		{
+			bool seen = (seen_site_sym_indices.find(site.sym_idx) != seen_site_sym_indices.end());
+			if(!seen)
+				seen_site_sym_indices.insert(site.sym_idx);
+			if(seen && skip_seen)
+				continue;
+
+			ofstr << "\t\t\t" << site_idx << " => Moment("
+				<< "s = " << get_str_var(site.spin_mag) << ", "
+				<< "g = -[ g_e 0 0; 0 g_e 0; 0 0 g_e ]),"
+				<< " # " << site.name << ", sym_idx = " << site.sym_idx << "\n";
+			++site_idx;
+		}
+
+		ofstr << "\t\t], :dipole)\n";
+
+		if(skip_seen)
+		{
+			ofstr << "\n\t# output generated sites\n";
+			ofstr << "\tsite_idx = 1\n";
+			ofstr << "\t@printf(\"Generated magnetic sites:\\n%6s %10s %10s %10s %10s %10s %10s %10s\\n\",\n";
+			ofstr << "\t\t\"index\", \"x\", \"y\", \"z\", \"Sx\", \"Sy\", \"Sz\", \"|S|\")\n";
+			ofstr << "\tfor (r, s) in zip(magsys.crystal.positions, magsys.dipoles)\n";
+			ofstr << "\t\t@printf(\"%6d %10.4g %10.4g %10.4g %10.4g %10.4g %10.4g %10.4g\\n\",\n";
+			ofstr << "\t\t\tsite_idx,\n";
+			ofstr << "\t\t\teps_to_0(r[1]), eps_to_0(r[2]), eps_to_0(r[3]),\n";
+			ofstr << "\t\t\teps_to_0(s[1]), eps_to_0(s[2]), eps_to_0(s[3]),\n";
+			ofstr << "\t\t\teps_to_0(LinearAlgebra.norm2(s)))\n";
+			ofstr << "\t\tglobal site_idx += 1\n";
+			ofstr << "\tend\n";
+		}
+	};
+
+	ofstr << "if !use_spacegroup\n";
+	gen_sites(false);
+	ofstr << "else\n";  // use_spacegroup
+	gen_sites(true);
+	ofstr << "end\n\n";   // use_spacegroup
+
+
+	ofstr << "num_sites = length(magsites.positions)\n";
+
+
+	ofstr << "\n\n# spin directions\n";
+	const auto& field = m_dyn.GetExternalField();
+	if(field.align_spins)
+	{
+		// set all spins to field direction
+		ofstr << "polarize_spins!(magsys, [ "
+			<< field.dir[0] << ", "
+			<< field.dir[1] << ", "
+			<< field.dir[2] << " ])\n";
+	}
+	else
+	{
+		// set individual spins
+		t_size site_idx = 1;
+		for(const t_site& site : m_dyn.GetMagneticSites())
+		{
+			ofstr << "set_dipole!(magsys, [ "
+				<< get_str_var(site.spin_dir[0]) << ", "
+				<< get_str_var(site.spin_dir[1]) << ", "
+				<< get_str_var(site.spin_dir[2]) << " ], "
+				<< "( 1, 1, 1, " << site_idx << " ))"
+				<< " # " << site.name << ", sym_idx = " << site.sym_idx << "\n";
+			++site_idx;
+		}
+	}
+
+	ofstr << "\n@printf(\"%s\", magsites)\n";
+	// --------------------------------------------------------------------
+
+
+	// --------------------------------------------------------------------
+	ofstr << "\n\n# magnetic couplings\n";
+	ofstr << "@printf(\"Setting up magnetic couplings...\\n\")\n";
+
+	std::unordered_set<t_size> seen_term_sym_indices;
+	for(const t_term& term : m_dyn.GetExchangeTerms())
+	{
+		t_size idx1 = m_dyn.GetMagneticSiteIndex(term.site1) + 1;
+		t_size idx2 = m_dyn.GetMagneticSiteIndex(term.site2) + 1;
+		bool is_aniso = (idx1 == idx2 && tl2::equals_0(term.dist_calc, g_eps));
+
+		if(is_aniso && idx1 - 1 < m_dyn.GetMagneticSites().size())
+		{
+			std::string S = get_str_var(m_dyn.GetMagneticSites()[idx1 - 1].spin_mag);
+			ofstr << "_S_mag = " << S << "\n";
+
+			ofstr << "set_onsite_coupling!(magsys, S -> "
+				<< "(2*" << S << ")/(2*" << S << " - 1) * ("  // thanks to A. Hertz for pointing out the 2S/(2S-1) definition factor
+				<< get_str_var(term.Jgen[0][0], true) << "*S[1]^2 + "
+				<< get_str_var(term.Jgen[1][1], true) << "*S[2]^2 + "
+				<< get_str_var(term.Jgen[2][2], true) << "*S[3]^2"
+				<< "), " << idx1 << ");\n";
+
+			// TODO: also treat dmi vector and general matrix
+		}
+
+		if(!is_aniso)
+		{
+			bool seen = (seen_term_sym_indices.find(term.sym_idx) != seen_term_sym_indices.end());
+			if(!seen)
+				seen_term_sym_indices.insert(term.sym_idx);
+
+			if(seen)
+				ofstr << "if !use_spacegroup\n\t";
+
+			ofstr << "set_exchange!(magsys,"
+				<< " # " << term.name << ", sym_idx = " << term.sym_idx
+				<< "\n\t[\n"
+				<< "\t\t" << get_str_var(term.J, true)             // 0,0
+				<< "   " << get_str_var(term.dmi[2], true)         // 0,1
+				<< "  -" << get_str_var(term.dmi[1], true) << ";"  // 0,2
+				<< "\n\t\t-" << get_str_var(term.dmi[2], true)     // 1,0
+				<< "   " << get_str_var(term.J, true)              // 1,1
+				<< "   " << get_str_var(term.dmi[0], true) << ";"  // 1,2
+				<< "\n\t\t" << get_str_var(term.dmi[1], true)      // 2,0
+				<< "  -" << get_str_var(term.dmi[0], true)         // 2,1
+				<< "   " << get_str_var(term.J, true)              // 2,2
+				<< "\n\t]";
+
+			if(!tl2::equals_0(term.Jgen_calc, g_eps))
+			{
+				ofstr << " +\n\t[\n"
+					<< "\t\t" << get_str_var(term.Jgen[0][0], true)
+					<< "  " << get_str_var(term.Jgen[0][1], true)
+					<< "  " << get_str_var(term.Jgen[0][2], true) << ";"
+					<< "\n\t\t" << get_str_var(term.Jgen[1][0], true)
+					<< "  " << get_str_var(term.Jgen[1][1], true)
+					<< "  " << get_str_var(term.Jgen[1][2], true) << ";"
+					<< "\n\t\t" << get_str_var(term.Jgen[2][0], true)
+					<< "  " << get_str_var(term.Jgen[2][1], true)
+					<< "  " << get_str_var(term.Jgen[2][2], true)
+					<< "\n\t]";
+			}
+
+			ofstr << ", Bond(" << idx1 << ", " << idx2 << ", [ "
+				<< get_str_var(term.dist[0]) << ", "
+				<< get_str_var(term.dist[1]) << ", "
+				<< get_str_var(term.dist[2])
+				<< " ]))\n";
+
+			if(seen)
+				ofstr << "end\n";  // !use_spacegroup
+		}
+	}  // terms
+
+
+	ofstr << R"BLOCK(
+# output generated couplings
+if use_spacegroup
+	@printf("Generated magnetic couplings:\n")
+	@printf("%6s %6s %6s %6s %6s %6s %6s %10s %10s %10s %10s %10s %10s %10s %10s %10s\n",
+		"sindex", "index", "site1", "site2", "dx", "dy", "dz",
+		"Jxx", "Jxy", "Jxz", "Jyx", "Jyy", "Jyz", "Jzx", "Jzy", "Jzz")
+
+	site_idx = 1
+	for interaction in magsys.interactions_union
+		term_idx = 1
+		for coupling in interaction.pair
+			b = coupling.bond
+			J = coupling.bilin
+
+			if length(J) == 1
+				J = [ J[1, 1] 0 0; 0 J[1, 1] 0; 0 0 J[1, 1] ]
+			end
+
+			@printf("%6d %6d %6d %6d %6d %6d %6d %10.4g %10.4g %10.4g %10.4g %10.4g %10.4g %10.4g %10.4g %10.4g\n",
+				site_idx, term_idx, b.i, b.j, b.n[1], b.n[2], b.n[3],
+				eps_to_0(J[1, 1]), eps_to_0(J[1, 2]), eps_to_0(J[1, 3]),
+				eps_to_0(J[2, 1]), eps_to_0(J[2, 2]), eps_to_0(J[2, 3]),
+				eps_to_0(J[3, 1]), eps_to_0(J[3, 2]), eps_to_0(J[3, 3]))
+
+			term_idx += 1
+		end
+		global site_idx += 1
+	end
+end)BLOCK" << "\n";
+
+
+	if(!tl2::equals_0<t_real>(field.mag, g_eps))
+	{
+		ofstr << "\n\n# external field\n";
+		ofstr << "set_field!(magsys, -[ "
+			<< field.dir[0] << ", "
+			<< field.dir[1] << ", "
+			<< field.dir[2] << " ] * " << field.mag
+			<< " * phys_units.T"
+			<< ")\n";
+	}
+	// --------------------------------------------------------------------
+
+
+	// --------------------------------------------------------------------
+	ofstr << "\n\n# optionally calculate the ground state\n";
+	ofstr << "if calc_groundstate\n";
+	ofstr << "\t@printf(\"Calculating ground state...\\n\")\n";
+	ofstr << "\trandomize_spins!(magsys)\n";
+	ofstr << "\tminimize_energy!(magsys; maxiters = 1024)\n";
+	ofstr << "end\n";
+	// --------------------------------------------------------------------
+
+
+	// --------------------------------------------------------------------
+	ofstr << "\n\n# optionally plot nuclear and magnetic structure\n";
+	ofstr << "if plot_structure\n";
+	ofstr << "\t@printf(\"Plotting structure...\\n\")\n";
+	ofstr << "\tusing GLMakie\n";
+	ofstr << "\tview_crystal(magsys, refbonds = 15, compass = true)\n";
+	ofstr << "\tplot_spins(magsys, compass = true)\n";
+	ofstr << "end\n";
+	// --------------------------------------------------------------------
+
+
+	// --------------------------------------------------------------------
+	if(m_dyn.IsIncommensurate())
+	{
+		const t_vec_real& prop = m_dyn.GetOrderingWavevector();
+		const t_vec_real& axis = m_dyn.GetRotationAxis();
+		//t_vec_real s0 = tl2::cross(prop, axis);
+		//t_real s0_len = tl2::norm(s0);
+		//if(!tl2::equals_0<t_real>(s0_len, g_eps))
+		//	s0 /= s0_len;
+
+		ofstr << "\n# incommensurate structure\n";
+		ofstr << "prop = [ " << prop[0] << ", " << prop[1] << ", " << prop[2] << " ]\n";
+		ofstr << "axis = [ " << axis[0] << ", " << axis[1] << ", " << axis[2] << " ]\n";
+
+		int sc_x = tl2::equals_0(prop[0], g_eps)
+			? 1 : int(std::ceil(t_real(1) / prop[0]));
+		int sc_y = tl2::equals_0(prop[1], g_eps)
+			? 1 : int(std::ceil(t_real(1) / prop[1]));
+		int sc_z = tl2::equals_0(prop[2], g_eps)
+			? 1 : int(std::ceil(t_real(1) / prop[2]));
+
+		ofstr << "\n# supercell for incommensurate structure\n";
+		ofstr << "if use_supercell\n";
+		ofstr << "\tmagsys = reshape_supercell(magsys, [ "
+			<< sc_x << " 0 0; 0 " << sc_y << " 0; 0 0 " << sc_z
+			<< " ])\n";
+
+		//ofstr << "set_spiral_order!(magsys; "
+		//	<< "k = [ " << prop[0] << ", " << prop[1] << ", " << prop[2] << " ], "
+		//	<< "axis = [ " << axis[0] << ", " << axis[1] << ", " << axis[2] << " ], "
+		//	<< "S0 = [ " << s0[0] << ", " << s0[1] << ", " << s0[2] << " ])\n";
+		ofstr << "\trepeat_periodically_as_spiral(magsys, "
+			<< "( " << sc_x << ", " << sc_y << ", " << sc_z << " ); "
+			<< "k = prop, axis = axis)\n";
+		ofstr << "end\n";
+	}
+
+	ofstr << "\n@printf(\"%s\\n\", magsys)\n";
+	// --------------------------------------------------------------------
+
+
+	// --------------------------------------------------------------------
+	ofstr << "\n\n# spin-wave calculation\n";
+	ofstr << "@printf(\"Calculating S(Q, E)...\\n\")\n";
+
+	// form factors
+	ofstr << "ffacts = nothing\n";
+	ofstr << "try\n";
+	ofstr << "\tglobal ffacts = [\n";
+	t_size site_idx = 1;
+	for(const t_site& site : m_dyn.GetMagneticSites())
+	{
+		if(site_idx == 1)
+			ofstr << "\t\t# TODO: use ion names as they are defined in sunny's database\n";
+		ofstr << "\t\t" << site_idx << " => FormFactor(\"" << site.name << "\"),\n";
+		++site_idx;
+	}
+	ofstr << "\t]\n";
+	ofstr << "catch err\n";
+	ofstr << "\t#println(\"Error: Invalid form factors.\")\n";
+	ofstr << "end\n";
+
+	// magnon energies and spin-spin correlations
+	ofstr << "cholesky_eps = 1e-8\n";
+	std::string proj = m_use_projector->isChecked() ? "ssf_perp" : "ssf_trace";
+
+	if(m_dyn.IsIncommensurate())
+	{
+		ofstr << "if !use_supercell\n";
+		ofstr << "\tcalc = SpinWaveTheorySpiral(magsys;\n"
+			<< "\t\tmeasure = " << proj << "(magsys; formfactors = ffacts),\n"
+			<< "\t\t#measure = ssf_custom_bm(magsys; u = plane1, v = plane2, formfactors = ffacts) do Q, S\n"
+			<< "\t\t#\treal(S[1, 1])\n"
+			<< "\t\t#end,\n"
+			<< "\t\tk = prop, axis = axis, "
+			<< "regularization = cholesky_eps)\n";
+		ofstr << "else\n\t";
+	}
+
+	ofstr << "calc = SpinWaveTheory(magsys;\n"
+		<< "\tmeasure = " << proj << "(magsys; formfactors = ffacts),\n"
+		<< "\t#measure = ssf_custom_bm(magsys; u = plane1, v = plane2, formfactors = ffacts) do Q, S\n"
+		<< "\t#\treal(S[1, 1])\n"
+		<< "\t#end,\n"
+		<< "\tregularization = cholesky_eps)\n";
+
+	if(m_dyn.IsIncommensurate())
+		ofstr << "end\n";
+
+	//ofstr << "momenta = collect(range(Qstart, Qend, Qpts))\n";
+	ofstr << "momenta = q_space_path(magsys.crystal, [ Qstart, Qend ], Qpts)\n";
+	ofstr << "bands = intensities_bands(calc, momenta)\n";
+	// --------------------------------------------------------------------
+
+
+	// --------------------------------------------------------------------
+	ofstr << "\n\n# plot the dispersion\n";
+	ofstr << "if plot_dynamics\n";
+	ofstr << "\t@printf(\"Plotting dispersion...\\n\")\n";
+	ofstr << "\tusing GLMakie\n";
+	ofstr << "\tplot_intensities(bands; fwhm = 0.1, units = phys_units)\n";
+	ofstr << "end\n";
+	// --------------------------------------------------------------------
+
+
+	// --------------------------------------------------------------------
+	ofstr << "\n\n# output the dispersion and spin-spin correlation\n";
+	ofstr << "if save_dynamics\n";
+	ofstr << "\t@printf(\"Outputting dispersion data to \\\"%s\\\", plot with:\\n"
+		<< "\\tgnuplot -p -e \\\"plot \\\\\\\"%s\\\\\\\" u " << q_idx
+		<< ":4:(sqrt(abs(\\\\\\$5))) w p pt 7 ps var\\\"\\n\", "
+		<< "datfile, datfile)\n";
+
+	ofstr << "\tenergies = bands.disp\n";
+	ofstr << "\tcorrelations = bands.data\n";
+
+	ofstr << "\topen(datfile, \"w\") do ostr\n";
+	ofstr <<
+		R"BLOCK(		@printf(ostr, "# %8s %10s %10s %10s %10s\n",
+			"h (rlu)", "k (rlu)", "l (rlu)", "E (meV)", "S(Q, E)")
+		for q_idx in 1:length(momenta.qs)
+			for e_idx in 1:length(energies[:, q_idx])
+				@printf(ostr, "%10.4f %10.4f %10.4f %10.4f %10.4f\n",
+					momenta.qs[q_idx][1], momenta.qs[q_idx][2], momenta.qs[q_idx][3],
+					energies[e_idx, q_idx],
+					correlations[e_idx, q_idx] / num_sites)
+			end
+		end
+	end
+end
+)BLOCK";
+	// --------------------------------------------------------------------
+
+	return true;
+}

@@ -1,0 +1,239 @@
+/**
+ * magnon dynamics -- info dialog
+ * @author Tobias Weber <tweber@ill.fr>
+ * @date june-2024
+ * @license GPLv3, see 'LICENSE' file
+ *
+ * ----------------------------------------------------------------------------
+ * magpie & mag-core
+ * Copyright (C) 2018-2026  Tobias WEBER (Institut Laue-Langevin (ILL),
+ *                          Grenoble, France).
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, version 3 of the License.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ * ----------------------------------------------------------------------------
+ */
+
+#include "infos.h"
+#include "defs.h"
+
+#include <QtWidgets/QGridLayout>
+#include <QtWidgets/QDialogButtonBox>
+#include <QtWidgets/QLabel>
+
+#include <boost/version.hpp>
+#include <boost/config.hpp>
+#include <boost/algorithm/string.hpp>
+#include <boost/algorithm/string/replace.hpp>
+namespace algo = boost::algorithm;
+
+
+
+/**
+ * set up the gui
+ */
+InfoDlg::InfoDlg(QWidget* parent, QSettings *sett)
+	: QDialog{parent}, m_sett(sett)
+{
+	setWindowTitle("About Magpie");
+	setSizeGripEnabled(true);
+
+	auto infopanel = new QWidget(this);
+	auto grid = new QGridLayout(infopanel);
+	grid->setSpacing(4);
+	grid->setContentsMargins(6, 6, 6, 6);
+
+	std::string strBoost = BOOST_LIB_VERSION;
+	algo::replace_all(strBoost, "_", ".");
+
+	lapack_int major = -1, minor = -1, patch = -1;
+	::LAPACKE_ilaver(&major, &minor, &patch);
+	std::ostringstream ostrLapack;
+	ostrLapack << major << "." << minor << "." << patch;
+
+	auto labelTitle = new QLabel("Magpie: A Graphical Magnon Software", infopanel);
+	auto fontTitle = labelTitle->font();
+	fontTitle.setBold(true);
+	labelTitle->setFont(fontTitle);
+	labelTitle->setAlignment(Qt::AlignHCenter);
+
+	auto labelVersion = new QLabel("Version " MAGPIE_VER ".", infopanel);
+	labelVersion->setAlignment(Qt::AlignHCenter);
+
+	auto labelAuthor = new QLabel("Written by Tobias Weber <tweber@ill.fr>.", infopanel);
+	labelAuthor->setAlignment(Qt::AlignHCenter);
+
+	auto labelDate = new QLabel("2022 - 2026.", infopanel);
+	labelDate->setAlignment(Qt::AlignHCenter);
+
+	auto labelIcon = new QLabel(infopanel);
+	auto labelIconFlipped = new QLabel(infopanel);
+	if(!g_icon.isNull())
+	{
+		labelIcon->setPixmap(g_icon.pixmap(75, 75));
+		labelIconFlipped->setPixmap(g_icon.pixmap(75, 75).transformed(QTransform{-1., 0., 0., 1., 0., 0.}));
+		labelIcon->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+		labelIconFlipped->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+	}
+
+	auto labelPaper = new QLabel(
+		"Paper upcoming!"  // TODO: Put DOI when published.
+		"<br>Paper DOI for Predecessor Software: "
+		"<a href=\"https://doi.org/10.1016/j.softx.2023.101471\">10.1016/j.softx.2023.101471</a>."
+		"<br>This program implements the formalism from "
+		"<a href=\"https://doi.org/10.1088/0953-8984/27/16/166002\">this paper</a> "
+		"(which is also available <a href=\"https://doi.org/10.48550/arXiv.1402.6069\">here</a>).",
+		infopanel);
+	labelPaper->setWordWrap(true);
+	labelPaper->setOpenExternalLinks(true);
+
+	auto labelDoi = new QLabel(
+		"Source Code DOI: "
+		"<a href=\"https://doi.org/10.5281/zenodo.16180814\">10.5281/zenodo.16180814</a>.",
+		infopanel);
+	labelDoi->setWordWrap(true);
+	labelDoi->setOpenExternalLinks(true);
+
+	auto labelLicense = new QLabel(
+		"<p>This program is free software: you can redistribute it and/or modify "
+		"it under the terms of the <u>GNU General Public License</u> as published by "
+		"the Free Software Foundation, <u>version 3</u> of the License.</p>"
+
+		"<p>This program is distributed in the hope that it will be useful, "
+		"but WITHOUT ANY WARRANTY; without even the implied warranty of "
+		"MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. "
+		"See the GNU General Public License for more details.</p>"
+
+		"<p>You should have received a copy of the GNU General Public License "
+		"along with this program. If not, see "
+		"<a href=\"http://www.gnu.org/licenses/\">&lt;http://www.gnu.org/licenses/&gt;</a>.</p>",
+		infopanel);
+		labelLicense->setWordWrap(true);
+		labelLicense->setOpenExternalLinks(true);
+
+	int y = 0;
+	int w = g_icon.isNull() ? 1 : 3;
+	int x = g_icon.isNull() ? 0 : 1;
+	grid->addWidget(labelTitle, y++, x, 1, 1);
+	grid->addWidget(labelVersion, y++, x, 1, 1);
+	grid->addWidget(labelAuthor, y++, x, 1, 1);
+	grid->addWidget(labelDate, y++, x, 1, 1);
+
+	if(!g_icon.isNull())
+	{
+		grid->addWidget(labelIcon, 0, 0, 4, 1);
+		grid->addWidget(labelIconFlipped, 0, 2, 4, 1);
+	}
+
+	auto sep1 = new QFrame(infopanel);
+	sep1->setFrameStyle(QFrame::HLine);
+	auto sep2 = new QFrame(infopanel);
+	sep2->setFrameStyle(QFrame::HLine);
+	auto sep3 = new QFrame(infopanel);
+	sep3->setFrameStyle(QFrame::HLine);
+	auto sep4 = new QFrame(infopanel);
+	sep4->setFrameStyle(QFrame::HLine);
+
+	grid->addItem(new QSpacerItem(16, 16,
+		QSizePolicy::Minimum, QSizePolicy::Fixed),
+		y++,0, 1,w);
+	grid->addWidget(sep1, y++, 0, 1, w);
+
+	grid->addWidget(new QLabel(
+		QString("Compiler: ") +
+		QString(BOOST_COMPILER) + ".",
+		infopanel), y++, 0, 1, w);
+	grid->addWidget(new QLabel(
+		QString("C++ Library: ") +
+		QString(BOOST_STDLIB) + ".",
+		infopanel), y++, 0, 1, w);
+	grid->addWidget(new QLabel(
+		QString("Build Date: ") +
+		QString(__DATE__) + ", " +
+		QString(__TIME__) + ".",
+		infopanel), y++, 0, 1, w);
+	grid->addWidget(new QLabel(
+		QString("Using %1-bit real and %2-bit integer type.").
+			arg(sizeof(t_real)*8).arg(sizeof(t_size)*8),
+		infopanel), y++, 0, 1, w);
+	/*if(g_resdir != "")
+	{
+		auto labelRes = new QLabel(
+			QString("Resource directory: ") +
+			g_resdir + ".",
+			infopanel);
+		labelRes->setWordWrap(true);
+		grid->addWidget(labelRes, y++, 0, 1, w);
+	}*/
+
+	grid->addWidget(sep2, y++, 0, 1, w);
+
+	grid->addWidget(new QLabel(
+		QString("Qt Version: ") +
+		QString(QT_VERSION_STR) + ".",
+		infopanel), y++, 0, 1, w);
+	grid->addWidget(new QLabel(
+		QString("Boost Version: ") +
+		strBoost.c_str() + ".",
+		infopanel), y++, 0, 1, w);
+	grid->addWidget(new QLabel(
+		QString("Lapack(e) Version: ") +
+		ostrLapack.str().c_str() + ".",
+		infopanel), y++, 0, 1, w);
+
+	grid->addWidget(sep3, y++, 0, 1, w);
+	grid->addWidget(labelPaper, y++, 0, 1, w);
+	grid->addWidget(labelDoi, y++, 0, 1, w);
+	grid->addWidget(sep4, y++, 0, 1, w);
+	grid->addWidget(labelLicense, y++, 0, 1, w);
+
+	grid->addItem(new QSpacerItem(16, 16,
+		QSizePolicy::Minimum, QSizePolicy::Expanding),
+		y++,0, 1,w);
+
+	QDialogButtonBox *btnbox = new QDialogButtonBox(this);
+	btnbox->addButton(QDialogButtonBox::Ok);
+	btnbox->setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
+	connect(btnbox, &QDialogButtonBox::accepted, this, &InfoDlg::accept);
+
+	auto dlgGrid = new QGridLayout(this);
+	dlgGrid->setSpacing(4);
+	dlgGrid->setContentsMargins(8, 8, 8, 8);
+	dlgGrid->addWidget(infopanel, 0, 0, 1, 4);
+	dlgGrid->addWidget(btnbox, 1, 3, 1, 1);
+
+	// restore settings
+	if(m_sett)
+	{
+		// restore dialog geometry
+		if(m_sett->contains("infos/geo"))
+			restoreGeometry(m_sett->value("infos/geo").toByteArray());
+		else
+			resize(700, 700);
+	}
+}
+
+
+
+/**
+ * close the dialog
+ */
+void InfoDlg::accept()
+{
+	if(m_sett)
+	{
+		// save dialog geometry
+		m_sett->setValue("infos/geo", saveGeometry());
+	}
+
+	QDialog::accept();
+}

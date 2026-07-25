@@ -1,0 +1,684 @@
+/**
+ * magnetic dynamics -- 3d dispersion calculation
+ * @author Tobias Weber <tweber@ill.fr>
+ * @date January 2025
+ * @license GPLv3, see 'LICENSE' file
+ *
+ * ----------------------------------------------------------------------------
+ * magpie & mag-core
+ * Copyright (C) 2018-2026  Tobias WEBER (Institut Laue-Langevin (ILL),
+ *                          Grenoble, France).
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, version 3 of the License.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ * ----------------------------------------------------------------------------
+ */
+
+#include <boost/scope_exit.hpp>
+#include <boost/asio.hpp>
+namespace asio = boost::asio;
+
+#include <cstdlib>
+#include <mutex>
+#include <sstream>
+
+#include "dispersion3d.h"
+
+#include "libs/algos.h"
+#include "libs/str.h"
+
+
+
+/**
+ * set a pointer to the main magdyn kernel
+ */
+void Dispersion3DDlg::SetKernel(const t_magdyn* dyn)
+{
+	m_dyn = dyn;
+}
+
+
+
+/**
+ * save the Q start and end points from the main window's dispersion
+ */
+void Dispersion3DDlg::SetDispersionQ(const t_vec_real& Qstart, const t_vec_real& Qend)
+{
+	m_Qstart = Qstart;
+	m_Qend = Qend;
+}
+
+
+
+/**
+ * set the Q position and directions from the main window's Q start and end points
+ */
+void Dispersion3DDlg::FromMainQ()
+{
+	if(m_Qstart.size() < 3 || m_Qend.size() < 3 || !m_dyn)
+		return;
+
+	const t_mat_real& xtalB = m_dyn->GetCrystalBTrafo();
+	const t_vec_real* plane = m_dyn->GetScatteringPlane();
+	if(!plane)
+		return;
+
+	// direction 1 is from the start to the end point
+	t_vec_real Qdir1 = m_Qend - m_Qstart;
+	// direction 2 is perpendicular to direction 1 inside the scattering plane
+	t_vec_real Qdir2 = tl2::cross(xtalB, plane[2], Qdir1);
+
+	for(int i = 0; i < 3; ++i)
+	{
+		m_Q_origin[i]->setValue(m_Qstart[i]);
+		m_Q_dir1[i]->setValue(Qdir1[i]);
+		m_Q_dir2[i]->setValue(Qdir2[i]);
+	}
+}
+
+
+
+/**
+ * get the Q origin and direction vectors
+ */
+std::tuple<t_vec_real, t_vec_real, t_vec_real> Dispersion3DDlg::GetQVectors() const
+{
+	t_vec_real Q_origin = tl2::create<t_vec_real>(
+	{
+		(t_real)m_Q_origin[0]->value(),
+		(t_real)m_Q_origin[1]->value(),
+		(t_real)m_Q_origin[2]->value(),
+	});
+
+	t_vec_real Q_dir_1 = tl2::create<t_vec_real>(
+	{
+		(t_real)m_Q_dir1[0]->value(),
+		(t_real)m_Q_dir1[1]->value(),
+		(t_real)m_Q_dir1[2]->value(),
+	});
+
+	t_vec_real Q_dir_2 = tl2::create<t_vec_real>(
+	{
+		(t_real)m_Q_dir2[0]->value(),
+		(t_real)m_Q_dir2[1]->value(),
+		(t_real)m_Q_dir2[2]->value(),
+	});
+
+	return std::make_tuple(std::move(Q_origin), std::move(Q_dir_1), std::move(Q_dir_2));
+}
+
+
+
+/**
+ * get the indices of the (principal) q directions
+ */
+std::tuple<t_size, t_size> Dispersion3DDlg::GetQIndices() const
+{
+	auto [Q_origin, Q_dir_1, Q_dir_2] = GetQVectors();
+
+	// find first Q axis index for plot
+	using t_idx = t_size;
+	t_idx Q_idx_1 = 0;
+	t_real cur_comp1 = Q_dir_1[Q_idx_1];
+	for(t_idx i = 0; i < 3; ++i)
+	{
+		// use largest absolute component as index
+		if(std::abs(Q_dir_1[i]) > std::abs(cur_comp1))
+		{
+			Q_idx_1 = i;
+			cur_comp1 = Q_dir_1[i];
+		}
+	}
+
+	// find second Q axis index for plot
+	t_idx Q_idx_2 = (Q_idx_1 + 1) % 3;
+	t_real cur_comp2 = Q_dir_2[Q_idx_2];
+	for(t_idx i = 0; i < 3; ++i)
+	{
+		if(i == Q_idx_1)
+			continue;
+
+		// use largest absolute component as index
+		if(std::abs(Q_dir_2[i]) > std::abs(cur_comp2))
+		{
+			Q_idx_2 = i;
+			cur_comp2 = Q_dir_2[i];
+		}
+	}
+
+	return std::make_tuple(Q_idx_1, Q_idx_2);
+}
+
+
+
+/**
+ * converts array indices to Q position
+ */
+t_vec_real Dispersion3DDlg::GetQFromIndices(std::size_t idx1, std::size_t idx2) const
+{
+	// get coordinates
+	auto [Q_origin, Q_dir_1, Q_dir_2] = GetQVectors();
+
+	t_vec_real Q_step_1 = Q_dir_1 / t_real(m_Q_count_1 - 1);
+	t_vec_real Q_step_2 = Q_dir_2 / t_real(m_Q_count_2 - 1);
+
+	return Q_origin + Q_step_1*t_real(idx1) + Q_step_2*t_real(idx2);
+}
+
+
+
+/**
+ * calculates the Q extents
+ */
+void Dispersion3DDlg::SetMinMaxQ()
+{
+	// get coordinates
+	auto [Q_origin, Q_dir_1, Q_dir_2] = GetQVectors();
+
+	m_Q_count_1 = m_num_Q_points[0]->value();
+	m_Q_count_2 = m_num_Q_points[1]->value();
+	if(m_Q_count_1 < 2 || m_Q_count_2 < 2)
+		return;
+
+	t_vec_real Q_step_1 = Q_dir_1 / t_real(m_Q_count_1 - 1);
+	t_vec_real Q_step_2 = Q_dir_2 / t_real(m_Q_count_2 - 1);
+
+	m_minmax_Q1[0] = Q_origin;
+	m_minmax_Q1[1] = Q_origin + Q_step_1*t_real(m_Q_count_1 - 1);
+	m_minmax_Q2[0] = Q_origin;
+	m_minmax_Q2[1] = Q_origin + Q_step_2*t_real(m_Q_count_2 - 1);
+}
+
+
+
+void Dispersion3DDlg::ClearData()
+{
+	m_minmax_E[0] = +std::numeric_limits<t_real>::max();
+	m_minmax_E[1] = -std::numeric_limits<t_real>::max();
+	m_minmax_Q1[0] = m_minmax_Q1[1] = tl2::zero<t_vec_real>(3);
+	m_minmax_Q2[0] = m_minmax_Q2[1] = tl2::zero<t_vec_real>(3);
+	m_data.clear();
+}
+
+
+
+/**
+ * calculate the dispersion
+ */
+void Dispersion3DDlg::Calculate()
+{
+	if(!m_dyn)
+		return;
+
+	ClearData();
+
+	BOOST_SCOPE_EXIT(this_)
+	{
+		this_->EnableCalculation(true);
+	} BOOST_SCOPE_EXIT_END
+	EnableCalculation(false);
+
+	SetMinMaxQ();
+	bool E_minmax_valid = false;
+
+	t_real min_S = m_S_filter->value();
+	bool use_weights = m_S_filter_enable->isChecked();
+	bool use_projector = true;
+	bool unite_degen = m_unite_degeneracies->isChecked();
+
+	// calculate the dispersion
+	t_magdyn dyn = *m_dyn;
+	dyn.SetUniteDegenerateEnergies(unite_degen);
+
+	// tread pool and mutex to protect the data vectors
+	asio::thread_pool pool{g_num_threads};
+	std::mutex mtx;
+
+	m_stop_requested = false;
+	m_progress->setMinimum(0);
+	m_progress->setMaximum(m_Q_count_1 * m_Q_count_2);
+	m_progress->setValue(0);
+	m_status->setText(QString("Starting calculation using %1 threads.").arg(g_num_threads));
+
+	tl2::Stopwatch<t_real> stopwatch;
+	stopwatch.start();
+
+	// create calculation tasks
+	using t_task = std::packaged_task<void()>;
+	using t_taskptr = std::shared_ptr<t_task>;
+	std::vector<t_taskptr> tasks;
+	tasks.reserve(m_Q_count_1 * m_Q_count_2);
+
+	t_size expected_bands = dyn.GetMagneticSitesCount() * 2;
+	if(dyn.IsIncommensurate())
+		expected_bands *= 3;
+	m_data.resize(expected_bands);
+
+	for(t_size Q_idx_1 = 0; Q_idx_1 < m_Q_count_1; ++Q_idx_1)
+	for(t_size Q_idx_2 = 0; Q_idx_2 < m_Q_count_2; ++Q_idx_2)
+	{
+		auto task = [this, &mtx, &dyn, Q_idx_1, Q_idx_2, &E_minmax_valid,
+			expected_bands, unite_degen, use_weights, use_projector, min_S]()
+		{
+			// calculate the dispersion at the given Q point
+			t_vec_real Q = GetQFromIndices(Q_idx_1, Q_idx_2);
+			auto Es_and_S = dyn.CalcEnergies(Q, !use_weights).E_and_S;
+
+			// iterate the energies for this Q point
+			t_size data_band_idx = 0;
+			for(t_size band_idx = 0; band_idx < Es_and_S.size() && data_band_idx < expected_bands; ++band_idx, ++data_band_idx)
+			{
+				const auto& E_and_S = Es_and_S[band_idx];
+
+				// energies
+				bool valid = true;
+				t_real E = E_and_S.E;
+				if(std::isnan(E) || std::isinf(E))
+				{
+					E = 0.;
+					valid = false;
+				}
+				else
+				{
+					m_minmax_E[0] = std::min(m_minmax_E[0], E);
+					m_minmax_E[1] = std::max(m_minmax_E[1], E);
+					E_minmax_valid = true;
+				}
+
+
+				// weights
+				t_real weight = -1;
+				if(use_weights)
+				{
+					weight = E_and_S.weight_perp;
+
+					if(!use_projector)
+					{
+						const t_mat& S = E_and_S.S;
+						weight = tl2::trace<t_mat>(S).real();
+					}
+
+					// filter invalid S(Q, E)
+					if(std::isnan(weight) || std::isinf(weight))
+						weight = 0.;
+
+					// filter minimum S(Q, E)
+					if(min_S >= 0. && std::abs(weight) <= min_S)
+						valid = false;
+				}  // weights
+
+
+				// count energy degeneracy
+				t_size degeneracy = E_and_S.degeneracy;
+				for(t_size band_idx2 = 0; band_idx2 < Es_and_S.size(); ++band_idx2)
+				{
+					if(band_idx2 == band_idx)
+						continue;
+
+					if(tl2::equals(E, Es_and_S[band_idx2].E, g_eps))
+						degeneracy += Es_and_S[band_idx2].degeneracy;
+				}
+
+				/*if(degeneracy > 1)
+				{
+					std::cout << "degenerate point: Q indices: " << Q_idx_1 << " " << Q_idx_2
+						<< ", band index: " << band_idx << " (" << data_band_idx
+						<< "): " << E << " meV (" << degeneracy << "x)" << std::endl;
+				}*/
+
+
+				// generate and add data point
+				t_data_Q dat{std::make_tuple(Q, E, weight, Q_idx_1, Q_idx_2, degeneracy, valid)};
+
+				std::lock_guard<std::mutex> _lck{mtx};
+				m_data[data_band_idx].emplace_back(std::move(dat));
+
+				if(unite_degen && degeneracy > 1)
+				{
+					// skip degeneracies to keep matching bands together
+					for(t_size band_idx2 = data_band_idx + 1; band_idx2 < data_band_idx + degeneracy; ++band_idx2)
+						m_data[band_idx2].emplace_back(std::make_tuple(Q, 0., 0., Q_idx_1, Q_idx_2, 1, false));
+
+					data_band_idx += degeneracy - 1;
+				}
+			}  // band iteration
+
+
+			// fill up band data in case some indices were skipped due to invalid hamiltonians
+			for(; data_band_idx < expected_bands; ++data_band_idx)
+			{
+				t_data_Q dat{std::make_tuple(Q, 0., 0., Q_idx_1, Q_idx_2, 1, false)};
+
+				std::lock_guard<std::mutex> _lck{mtx};
+				m_data[data_band_idx].emplace_back(std::move(dat));
+			}
+		};  // task
+
+		t_taskptr taskptr = std::make_shared<t_task>(task);
+		tasks.push_back(taskptr);
+		asio::post(pool, [taskptr]() { (*taskptr)(); });
+	}  // Q iteration
+
+	if(!E_minmax_valid)
+		m_minmax_E[0] = m_minmax_E[1] = 0.;
+
+	m_status->setText(QString("Calculating dispersion in %1 threads...").arg(g_num_threads));
+
+	// get results from tasks
+	for(std::size_t task_idx = 0; task_idx < tasks.size(); ++task_idx)
+	{
+		t_taskptr task = tasks[task_idx];
+
+		// process events to see if the stop button was clicked
+		// only do this for a fraction of the points to avoid gui overhead
+		bool process_evts = (task_idx % std::max<t_size>(tasks.size() / std::sqrt(g_stop_check_fraction), 1) == 0);
+		if(process_evts)
+			qApp->processEvents();
+
+		if(m_stop_requested)
+		{
+			pool.stop();
+			break;
+		}
+
+		task->get_future().get();
+
+		if(process_evts || task_idx + 1 == tasks.size())
+			m_progress->setValue(task_idx + 1);
+	}
+
+	// finish parallel calculations
+	pool.join();
+
+	// get sorting of data by Q
+	for(t_size band_idx = 0; band_idx < m_data.size(); ++band_idx)
+	{
+		std::vector<std::size_t> perm = tl2::get_perm(m_data[band_idx].size(),
+			[this, band_idx](std::size_t idx1, std::size_t idx2) -> bool
+		{
+			/*
+			// sorting by Q components
+			t_real h1 = std::get<0>(m_data[0][idx1])[0];
+			t_real k1 = std::get<0>(m_data[0][idx1])[1];
+			t_real l1 = std::get<0>(m_data[0][idx1])[2];
+
+			t_real h2 = std::get<0>(m_data[0][idx2])[0];
+			t_real k2 = std::get<0>(m_data[0][idx2])[1];
+			t_real l2 = std::get<0>(m_data[0][idx2])[2];
+
+			if(!tl2::equals(h1, h2, g_eps))
+				return h1 < h2;
+			if(!tl2::equals(k1, k2, g_eps))
+				return k1 < k2;
+
+			return l1 < l2;*/
+
+			// sorting by Q indices
+			t_size Q1_idx_1 = std::get<3>(m_data[band_idx][idx1]);
+			t_size Q1_idx_2 = std::get<4>(m_data[band_idx][idx1]);
+			t_size Q2_idx_1 = std::get<3>(m_data[band_idx][idx2]);
+			t_size Q2_idx_2 = std::get<4>(m_data[band_idx][idx2]);
+
+			if(Q1_idx_1 != Q2_idx_1)
+				return Q1_idx_1 < Q2_idx_1;
+			return Q1_idx_2 < Q2_idx_2;
+		});
+
+		m_data[band_idx] = tl2::reorder(m_data[band_idx], perm);
+	}
+
+	// move degenerate points to the bands where most of the other points are
+	if(unite_degen && m_data.size())
+	{
+		for(t_size band_idx = 0; band_idx < m_data.size() - 1; ++band_idx)
+		{
+			t_data_Qs& band1 = m_data[band_idx];
+			t_data_Qs& band2 = m_data[band_idx + 1];
+			if(band1.size() != band2.size())
+				continue;
+
+			auto [_valid1, invalid1] = NumValid(band1);
+			auto [_valid2, invalid2] = NumValid(band2);
+
+			for(t_size Q_idx = 0; Q_idx < band1.size(); ++Q_idx)
+			{
+				t_size degen1 = std::get<5>(band1[Q_idx]);
+				bool valid1 = std::get<6>(band1[Q_idx]);
+				bool valid2 = std::get<6>(band2[Q_idx]);
+
+				if(degen1 > 1 && valid1 && !valid2 && invalid1 > invalid2)
+					std::swap(band1[Q_idx], band2[Q_idx]);
+			}
+		}
+	}
+
+	// remove fully invalid bands
+	for(auto iter = m_data.begin(); iter != m_data.end();)
+	{
+		if(!IsValid(*iter))
+			iter = m_data.erase(iter);
+		else
+			++iter;
+	}
+
+	// sort band energies in descending order
+	std::stable_sort(m_data.begin(), m_data.end(), [this](const t_data_Qs& dat1, const t_data_Qs& dat2)
+	{
+		return GetMeanEnergy(dat1) >= GetMeanEnergy(dat2);
+	});
+
+	// show elapsed time
+	stopwatch.stop();
+	std::ostringstream ostrMsg;
+	ostrMsg.precision(g_prec_gui);
+	ostrMsg << "Dispersion calculation";
+	if(m_stop_requested)
+		ostrMsg << " stopped ";
+	else
+		ostrMsg << " finished ";
+	ostrMsg << "after " << stopwatch.GetDur() << " s.";
+	m_status->setText(ostrMsg.str().c_str());
+
+	Plot(true);
+}
+
+
+
+/**
+ * count number of bands within the given energy range
+ */
+std::pair<t_size, t_size> Dispersion3DDlg::BandIndicesInRange() const
+{
+	bool use_E_min = m_enable_E_range[0]->isChecked();
+	bool use_E_max = m_enable_E_range[1]->isChecked();
+	t_real E_min_sel = m_E_range[0]->value();
+	t_real E_max_sel = m_E_range[1]->value();
+
+	// determine if a band is withing the given energy range
+	auto is_band_in_range = [use_E_min, use_E_max, E_min_sel, E_max_sel](
+		const t_data_Qs& data) -> bool
+	{
+		for(const t_data_Q& data : data)
+		{
+			t_real E = std::get<1>(data);
+			if(use_E_min && E < E_min_sel)
+				return false;
+			if(use_E_max && E > E_max_sel)
+				return false;
+		}
+
+		return true;
+	};
+
+
+	std::optional<t_size> begin;
+	t_size num_bands = 0;
+
+	for(t_size band_idx = 0; band_idx < m_data.size(); ++band_idx)
+	{
+		const t_data_Qs& band = m_data[band_idx];
+
+		if(is_band_in_range(band))
+		{
+			if(!begin)
+				begin = band_idx;
+			++num_bands;
+		}
+	}
+
+	if(!begin)
+		begin = m_data.size();
+	return std::make_pair(*begin, *begin + num_bands);
+}
+
+
+
+/**
+ * determine if a band is valid or only contains invalid points
+ */
+bool Dispersion3DDlg::IsValid(const t_data_Qs& data) const
+{
+	for(const t_data_Q& data : data)
+	{
+		// data point valid?
+		if(std::get<6>(data))
+			return true;
+	}
+
+	// all points invalid
+	return false;
+}
+
+
+
+/**
+ * count the number of valid and invalid points in a band
+ */
+std::pair<t_size, t_size> Dispersion3DDlg::NumValid(const t_data_Qs& data) const
+{
+	t_size valid = 0, invalid = 0;
+
+	for(const t_data_Q& data : data)
+	{
+		// data point valid?
+		if(std::get<6>(data))
+			++valid;
+		else
+			++invalid;
+	}
+
+	return std::make_pair(valid, invalid);
+}
+
+
+
+/**
+ * calculate the mean band energy
+ */
+t_real Dispersion3DDlg::GetMeanEnergy(const Dispersion3DDlg::t_data_Qs& data) const
+{
+	t_real E_mean = 0.;
+	t_size num_pts = 0;
+
+	for(const t_data_Q& data : data)
+	{
+		// data point invalid?
+		if(!std::get<6>(data))
+			continue;
+
+		E_mean += std::get<1>(data);
+		++num_pts;
+	}
+
+	if(num_pts)
+		E_mean /= static_cast<t_real>(num_pts);
+	return E_mean;
+}
+
+
+
+/**
+ * calculate the mean band energy
+ */
+t_real Dispersion3DDlg::GetMeanEnergy(t_size band_idx) const
+{
+	if(band_idx >= m_data.size())
+		return 0.;
+
+	return GetMeanEnergy(m_data[band_idx]);
+}
+
+
+
+/**
+ * clears the table of magnon bands
+ */
+void Dispersion3DDlg::ClearBands()
+{
+	m_band_objs.clear();
+	m_cur_obj = std::nullopt;
+
+	m_table_bands->clearContents();
+	m_table_bands->setRowCount(0);
+}
+
+
+
+/**
+ * adds a magnon band to the table
+ */
+void Dispersion3DDlg::AddBand(const std::string& name, const QColor& colour, bool enabled)
+{
+	if(!m_table_bands)
+		return;
+
+	int row = m_table_bands->rowCount();
+	m_table_bands->insertRow(row);
+
+	QTableWidgetItem *item = new QTableWidgetItem{name.c_str()};
+	item->setFlags(item->flags() & ~Qt::ItemIsEditable);
+
+	QBrush bg = item->background();
+	bg.setColor(colour);
+	bg.setStyle(Qt::SolidPattern);
+	item->setBackground(bg);
+
+	QBrush fg = item->foreground();
+	fg.setColor(QColor{0xff, 0xff, 0xff});
+	fg.setStyle(Qt::SolidPattern);
+	item->setForeground(fg);
+
+	QCheckBox *checkBand = new QCheckBox(m_table_bands);
+	checkBand->setChecked(enabled);
+	connect(checkBand, &QCheckBox::toggled, [this]() { Plot(false); });
+
+	m_table_bands->setItem(row, COL_BC_BAND, item);
+	m_table_bands->setCellWidget(row, COL_BC_ACTIVE, checkBand);
+}
+
+
+
+/**
+ * verifies if the band's checkbox is checked
+ */
+bool Dispersion3DDlg::IsBandEnabled(t_size idx) const
+{
+	if(!m_table_bands || int(idx) >= m_table_bands->rowCount())
+		return true;
+
+	QCheckBox* box = reinterpret_cast<QCheckBox*>(
+		m_table_bands->cellWidget(int(idx), COL_BC_ACTIVE));
+	if(!box)
+		return true;
+
+	return box->isChecked();
+}

@@ -1,0 +1,2528 @@
+/**
+ * GL plotter
+ * @author Tobias Weber <tweber@ill.fr>
+ * @date 2017 - 2026
+ * @license GPLv3, see 'LICENSE' file
+ *
+ * @note this file is based on code from my following projects:
+ *	- "geo" (https://github.com/t-weber/geo),
+ *  - "mathlibs" (https://github.com/t-weber/mathlibs),
+ *  - "magtools" (https://github.com/t-weber/magtools).
+ *	- "TAS-Paths" (https://github.com/ILLGrenoble/taspaths).
+ *
+ * References:
+ *   - http://doc.qt.io/qt-5/qopenglwidget.html#details
+ *   - http://code.qt.io/cgit/qt/qtbase.git/tree/examples/opengl/threadedqopenglwidget
+ *
+ * ----------------------------------------------------------------------------
+ * Magpie
+ * Copyright (C) 2022-2026  Tobias WEBER (Institut Laue-Langevin (ILL),
+ *                          Grenoble, France).
+ * TAS-Paths
+ * Copyright (C) 2021       Tobias WEBER (Institut Laue-Langevin (ILL),
+ *                          Grenoble, France).
+ * "magtools", "geo", "misc", and "mathlibs" projects
+ * Copyright (C) 2017-2022  Tobias WEBER (privately developed).
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, version 3 of the License.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ * ----------------------------------------------------------------------------
+ */
+
+#include "glplot.h"
+#include "../voronoi.h"
+
+#include <QtGui/QPainter>
+#include <QtGui/QGuiApplication>
+#include <QtCore/QtGlobal>
+
+#include <QtWidgets/QGestureEvent>
+#include <QtWidgets/QGesture>
+#include <QtWidgets/QPinchGesture>
+
+#include <iostream>
+#include <boost/scope_exit.hpp>
+#include <boost/preprocessor/stringize.hpp>
+#include <boost/algorithm/string/replace.hpp>
+namespace algo = boost::algorithm;
+
+
+namespace tl2 {
+// ----------------------------------------------------------------------------
+// GL plot renderer
+// ----------------------------------------------------------------------------
+
+GlPlotRenderer::GlPlotRenderer(GlPlot *pPlot) : m_pPlot{pPlot}
+{
+	if constexpr(m_usetimer)
+	{
+		connect(&m_timer, &QTimer::timeout,
+			this, static_cast<void (GlPlotRenderer::*)()>(
+				&GlPlotRenderer::tick));
+		m_timer.start(std::chrono::milliseconds(1000 / 60));
+	}
+
+	m_font.setStyleStrategy(QFont::StyleStrategy(
+		QFont::PreferAntialias | QFont::PreferQuality));
+
+	UpdateCam();
+}
+
+
+GlPlotRenderer::~GlPlotRenderer()
+{
+	if constexpr(m_usetimer)
+		m_timer.stop();
+
+	// get context
+	if constexpr(m_isthreaded)
+	{
+		if(m_pPlot)
+			m_pPlot->context()->moveToThread(qGuiApp->thread());
+	}
+
+	if(m_pPlot)
+		m_pPlot->makeCurrent();
+	BOOST_SCOPE_EXIT(m_pPlot)
+	{
+		if(m_pPlot)
+			m_pPlot->doneCurrent();
+	} BOOST_SCOPE_EXIT_END
+
+	// delete gl objects within current gl context
+	m_pShaders.reset();
+
+	qgl_funcs* pGl = GetGlFunctions();
+	for(auto &obj : m_objs)
+		delete_render_object(obj);
+
+	m_objs.clear();
+	LOGGLERR(pGl)
+}
+
+
+void GlPlotRenderer::startedThread() { }
+void GlPlotRenderer::stoppedThread() { }
+
+
+void GlPlotRenderer::SetFont(const QString& fontname)
+{
+	if(fontname == "")
+		return;
+
+	QFont font;
+	if(font.fromString(fontname))
+	{
+		m_font = std::move(font);
+		//std::cout << "Set font: " << fontname.toStdString() << std::endl;
+	}
+}
+
+
+QPointF GlPlotRenderer::GlToScreenCoords(const t_vec_gl& vec4,
+	const GlRenderObj *obj, bool *visible) const
+{
+	t_vec_gl pt;
+	if(obj && obj->m_cam_invariant)
+		pt = m_cam.ToScreenCoordsInvar(vec4, obj->m_mat_after_cam, obj->m_mat_after_proj, visible);
+	else
+		pt = m_cam.ToScreenCoords(vec4, visible);
+
+	return QPointF(pt[0], pt[1]);
+}
+
+
+GlRenderObj GlPlotRenderer::CreateTriangleObject(const std::vector<t_vec3_gl>& verts,
+	const std::vector<t_vec3_gl>& triagverts, const std::vector<t_vec3_gl>& norms,
+	const t_vec_gl& colour, bool bUseVertsAsNorm, const std::vector<t_vec3_gl>* uvs)
+{
+	GlRenderObj obj;
+	create_triangle_object(m_pPlot, obj, verts, triagverts, norms,
+	  uvs ? *uvs : std::vector<t_vec3_gl>{}, colour, bUseVertsAsNorm,
+		m_attrVertex, m_attrVertexNorm, m_attrVertexCol, m_attrTexCoords);
+	return obj;
+}
+
+
+GlRenderObj GlPlotRenderer::CreateLineObject(
+	const std::vector<t_vec3_gl>& verts, const t_vec_gl& colour)
+{
+	GlRenderObj obj;
+	create_line_object(m_pPlot, obj, verts, colour, m_attrVertex, m_attrVertexCol);
+	return obj;
+}
+
+
+void GlPlotRenderer::SetObjectMatrix(std::size_t idx, const t_mat_gl& mat)
+{
+	if(GlRenderObj *obj = GetObject(idx); obj)
+		obj->m_mat = mat;
+}
+
+
+void GlPlotRenderer::SetObjectMatrixAfterCam(std::size_t idx, const t_mat_gl& mat)
+{
+	if(GlRenderObj *obj = GetObject(idx); obj)
+		obj->m_mat_after_cam = mat;
+}
+
+
+
+void GlPlotRenderer::SetObjectMatrixAfterProj(std::size_t idx, const t_mat_gl& mat)
+{
+	if(GlRenderObj *obj = GetObject(idx); obj)
+		obj->m_mat_after_proj = mat;
+}
+
+
+const t_mat_gl& GlPlotRenderer::GetObjectMatrix(std::size_t idx) const
+{
+	if(const GlRenderObj *obj = GetObject(idx); obj)
+		return obj->m_mat;
+
+	std::cerr << "GL error: Requested invalid matrix for object "
+		<< idx << "." << std::endl;
+	static const t_mat_gl invalid_mat;
+	return invalid_mat;
+}
+
+
+void GlPlotRenderer::SetObjectCol(std::size_t idx,
+	t_real_gl r, t_real_gl g, t_real_gl b, t_real_gl a)
+{
+	if(GlRenderObj *obj = GetObject(idx); obj)
+		obj->m_colour = tl2::create<t_vec_gl>({ r, g, b, a });
+}
+
+
+void GlPlotRenderer::SetObjectLabel(std::size_t idx, const std::string& label,
+	const t_vec3_gl *pos)
+{
+	if(GlRenderObj *obj = GetObject(idx); obj)
+	{
+		obj->m_label = label;
+		if(pos)
+			obj->m_label_pos = *pos;
+	}
+}
+
+const std::string& GlPlotRenderer::GetObjectLabel(std::size_t idx) const
+{
+	if(const GlRenderObj *obj = GetObject(idx); obj)
+		return obj->m_label;
+
+	static const std::string invalid_label;
+	return invalid_label;
+}
+
+
+void GlPlotRenderer::SetObjectDataString(std::size_t idx, const std::string& data)
+{
+	if(GlRenderObj *obj = GetObject(idx); obj)
+		obj->m_datastr = data;
+}
+
+const std::string& GlPlotRenderer::GetObjectDataString(std::size_t idx) const
+{
+	if(const GlRenderObj *obj = GetObject(idx); obj)
+		return obj->m_datastr;
+
+	static const std::string invalid_str;
+	return invalid_str;
+}
+
+
+void GlPlotRenderer::SetObjectVisible(std::size_t idx, bool visible)
+{
+	if(GlRenderObj *obj = GetObject(idx); obj)
+		obj->m_visible = visible;
+}
+
+
+void GlPlotRenderer::SetObjectIntersectable(std::size_t idx, bool intersect)
+{
+	if(GlRenderObj *obj = GetObject(idx); obj)
+		obj->m_intersect = intersect;
+}
+
+
+bool GlPlotRenderer::GetObjectVisible(std::size_t idx) const
+{
+	if(const GlRenderObj *obj = GetObject(idx); obj)
+		return obj->m_visible;
+	return false;
+}
+
+
+void GlPlotRenderer::SetObjectLighting(std::size_t idx, int lighting)
+{
+	if(GlRenderObj *obj = GetObject(idx); obj)
+		obj->m_lighting = lighting;
+}
+
+
+void GlPlotRenderer::SetObjectHighlight(std::size_t idx, bool highlight)
+{
+	if(GlRenderObj *obj = GetObject(idx); obj)
+		obj->m_highlighted = highlight;
+}
+
+
+/**
+ * set highlight flag for all objects
+ */
+void GlPlotRenderer::SetObjectsHighlight(bool highlight)
+{
+	for(std::size_t idx = 0; idx < m_objs.size(); ++idx)
+		m_objs[idx].m_highlighted = highlight;
+}
+
+
+void GlPlotRenderer::SetObjectPriority(std::size_t idx, int prio)
+{
+	if(GlRenderObj *obj = GetObject(idx); obj)
+		obj->m_priority = prio;
+}
+
+
+bool GlPlotRenderer::GetObjectHighlight(std::size_t idx) const
+{
+	if(const GlRenderObj *obj = GetObject(idx); obj)
+		return obj->m_highlighted;
+	return false;
+}
+
+
+void GlPlotRenderer::SetObjectInvariant(std::size_t idx, bool invariant)
+{
+	if(GlRenderObj *obj = GetObject(idx); obj)
+		obj->m_invariant = invariant;
+}
+
+
+void GlPlotRenderer::SetObjectCameraInvariant(std::size_t idx, bool invariant)
+{
+	if(GlRenderObj *obj = GetObject(idx); obj)
+		obj->m_cam_invariant = invariant;
+}
+
+
+void GlPlotRenderer::SetObjectForceCull(std::size_t idx, bool cull)
+{
+	if(GlRenderObj *obj = GetObject(idx); obj)
+		obj->m_force_cull = cull;
+}
+
+
+void GlPlotRenderer::SetObjectCullBack(std::size_t idx, bool cull_back)
+{
+	if(GlRenderObj *obj = GetObject(idx); obj)
+		obj->m_cull_back = cull_back;
+}
+
+
+void GlPlotRenderer::RemoveObject(std::size_t idx)
+{
+	GlRenderObj *obj = GetObject(idx);
+	if(!obj)
+		return;
+
+	obj->m_valid = false;
+
+	obj->m_vertex_buffer.reset();
+	obj->m_normals_buffer.reset();
+	obj->m_colour_buffer.reset();
+
+	obj->m_vertices.clear();
+	obj->m_triangles.clear();
+
+	CollectGarbage();
+}
+
+
+void GlPlotRenderer::RemoveObjects()
+{
+	for(std::size_t obj = 0; obj < m_objs.size(); ++obj)
+	{
+		// keep coordinate crosses
+		if(m_coordCrossLab && obj == *m_coordCrossLab)
+			continue;
+		if(m_coordCrossXtal && obj == *m_coordCrossXtal)
+			continue;
+		bool found = false;
+		for(std::size_t i = 0; i < m_coordCubeLab.size(); ++i)
+		{
+			if(obj == m_coordCubeLab[i])
+			{
+				found = true;
+				break;
+			}
+		}
+		if(found)
+			continue;
+
+		RemoveObject(obj);
+	}
+
+	CollectGarbage();
+}
+
+
+/**
+ * remove invalid objects
+ */
+void GlPlotRenderer::CollectGarbage()
+{
+	QMutexLocker _locker{&m_mutexObj};
+
+	// remove all invalid objects at the end of the list
+	for(std::ptrdiff_t idx = m_objs.size() - 1; idx >= 0; --idx)
+	{
+		if(m_objs[idx].m_valid)
+			break;
+
+		m_objs.erase(m_objs.begin() + idx);
+	}
+}
+
+
+std::size_t GlPlotRenderer::AddLinkedObject(std::size_t linkTo,
+	t_real_gl x, t_real_gl y, t_real_gl z,
+	t_real_gl r, t_real_gl g, t_real_gl b, t_real_gl a)
+{
+	GlRenderObj obj;
+	obj.linkedObj = linkTo;
+	obj.m_mat = tl2::hom_translation<t_mat_gl>(x, y, z);
+	obj.m_colour = tl2::create<t_vec_gl>({r, g, b, a});
+
+	QMutexLocker _locker{&m_mutexObj};
+	m_objs.emplace_back(std::move(obj));
+
+	return m_objs.size() - 1;		// object handle
+}
+
+
+std::size_t GlPlotRenderer::AddCuboid(
+	t_real_gl lx, t_real_gl ly, t_real_gl lz,
+	t_real_gl x, t_real_gl y, t_real_gl z,
+	t_real_gl r, t_real_gl g, t_real_gl b, t_real_gl a)
+{
+	auto solid = tl2::create_cuboid<t_vec3_gl>(lx, ly, lz);
+	auto [triagverts, norms, uvs] = tl2::create_triangles<t_vec3_gl>(solid);
+	auto [boundingSpherePos, boundingSphereRad] =
+		tl2::bounding_sphere<t_vec3_gl>(triagverts);
+
+	QMutexLocker _locker{&m_mutexObj};
+
+	auto obj = CreateTriangleObject(std::get<0>(solid),
+		triagverts, norms, tl2::create<t_vec_gl>({ r, g, b, a }),
+		false, &uvs);
+	obj.m_mat = tl2::hom_translation<t_mat_gl>(x, y, z);
+	obj.m_boundingSpherePos = std::move(boundingSpherePos);
+	obj.m_boundingSphereRad = boundingSphereRad;
+	m_objs.emplace_back(std::move(obj));
+
+	return m_objs.size() - 1;		// object handle
+}
+
+
+std::vector<std::size_t> GlPlotRenderer::AddCuboidFaces(
+	t_real_gl lx, t_real_gl ly, t_real_gl lz,
+	t_real_gl x, t_real_gl y, t_real_gl z,
+	t_real_gl r, t_real_gl g, t_real_gl b, t_real_gl a,
+	bool flip_uv)
+{
+	auto org_solid = tl2::create_cuboid<t_vec3_gl>(lx, ly, lz, flip_uv);
+	auto solids = split_solid<t_vec3_gl>(org_solid);
+
+	std::vector<std::size_t> obj_handles;
+	obj_handles.reserve(solids.size());
+
+	for(const auto& solid : solids)
+	{
+		auto [triagverts, norms, uvs] = tl2::create_triangles<t_vec3_gl>(solid);
+		auto [boundingSpherePos, boundingSphereRad] =
+			tl2::bounding_sphere<t_vec3_gl>(triagverts);
+
+		QMutexLocker _locker{&m_mutexObj};
+
+		auto obj = CreateTriangleObject(std::get<0>(solid),
+			triagverts, norms, tl2::create<t_vec_gl>({ r, g, b, a }),
+			false, &uvs);
+		obj.m_mat = tl2::hom_translation<t_mat_gl>(x, y, z);
+		obj.m_boundingSpherePos = std::move(boundingSpherePos);
+		obj.m_boundingSphereRad = boundingSphereRad;
+		m_objs.emplace_back(std::move(obj));
+
+		obj_handles.push_back(m_objs.size() - 1);
+	}
+
+	return obj_handles;
+}
+
+
+std::size_t GlPlotRenderer::AddSphere(
+	t_real_gl rad, t_real_gl x, t_real_gl y, t_real_gl z,
+	t_real_gl r, t_real_gl g, t_real_gl b, t_real_gl a)
+{
+	constexpr int numsubdivs = 2;
+
+	auto solid = tl2::create_icosahedron<t_vec3_gl>(1);
+	auto [triagverts, norms, uvs] = tl2::spherify<t_vec3_gl>(
+		tl2::subdivide_triangles<t_vec3_gl>(
+			tl2::create_triangles<t_vec3_gl>(solid), numsubdivs), rad);
+	auto [boundingSpherePos, boundingSphereRad] =
+		tl2::bounding_sphere<t_vec3_gl>(triagverts);
+
+	QMutexLocker _locker{&m_mutexObj};
+
+	auto obj = CreateTriangleObject(std::get<0>(solid),
+		triagverts, norms, tl2::create<t_vec_gl>({ r, g, b, a }),
+		true, &uvs);
+	obj.m_mat = tl2::hom_translation<t_mat_gl>(x, y, z);
+	obj.m_boundingSpherePos = std::move(boundingSpherePos);
+	obj.m_boundingSphereRad = boundingSphereRad;
+	//obj.m_boundingSphereRad = rad;
+	m_objs.emplace_back(std::move(obj));
+
+	return m_objs.size() - 1;		// object handle
+}
+
+
+std::size_t GlPlotRenderer::AddCylinder(t_real_gl rad, t_real_gl h,
+	t_real_gl x, t_real_gl y, t_real_gl z,
+	t_real_gl r, t_real_gl g, t_real_gl b, t_real_gl a)
+{
+	auto solid = tl2::create_cylinder<t_vec3_gl>(rad, h, true);
+	auto [triagverts, norms, uvs] = tl2::create_triangles<t_vec3_gl>(solid);
+	auto [boundingSpherePos, boundingSphereRad] =
+		tl2::bounding_sphere<t_vec3_gl>(triagverts);
+
+	QMutexLocker _locker{&m_mutexObj};
+
+	auto obj = CreateTriangleObject(std::get<0>(solid),
+		triagverts, norms, tl2::create<t_vec_gl>({ r, g, b, a }),
+		false, &uvs);
+	obj.m_mat = tl2::hom_translation<t_mat_gl>(x, y, z);
+	obj.m_boundingSpherePos = std::move(boundingSpherePos);
+	obj.m_boundingSphereRad = boundingSphereRad;
+	m_objs.emplace_back(std::move(obj));
+
+	return m_objs.size() - 1;		// object handle
+}
+
+
+std::size_t GlPlotRenderer::AddCone(t_real_gl rad, t_real_gl h,
+	t_real_gl x, t_real_gl y, t_real_gl z,
+	t_real_gl r, t_real_gl g, t_real_gl b, t_real_gl a)
+{
+	auto solid = tl2::create_cone<t_vec3_gl>(rad, h);
+	auto [triagverts, norms, uvs] = tl2::create_triangles<t_vec3_gl>(solid);
+	auto [boundingSpherePos, boundingSphereRad] =
+		tl2::bounding_sphere<t_vec3_gl>(triagverts);
+
+	QMutexLocker _locker{&m_mutexObj};
+
+	auto obj = CreateTriangleObject(std::get<0>(solid),
+		triagverts, norms, tl2::create<t_vec_gl>({ r, g, b, a }),
+		false, &uvs);
+	obj.m_mat = tl2::hom_translation<t_mat_gl>(x, y, z);
+	obj.m_boundingSpherePos = std::move(boundingSpherePos);
+	obj.m_boundingSphereRad = boundingSphereRad;
+	m_objs.emplace_back(std::move(obj));
+
+	return m_objs.size() - 1;		// object handle
+}
+
+
+std::size_t GlPlotRenderer::AddArrow(t_real_gl rad, t_real_gl h,
+	t_real_gl x, t_real_gl y, t_real_gl z,
+	t_real_gl r, t_real_gl g, t_real_gl b, t_real_gl a)
+{
+	const t_real_gl arrow_r = rad * 2.;
+	const t_real_gl arrow_h = rad * 2.5;
+	auto solid = tl2::create_cylinder<t_vec3_gl>(rad, h, 2, 32, arrow_r, arrow_h);
+	auto [triagverts, norms, uvs] = tl2::create_triangles<t_vec3_gl>(solid);
+	auto [boundingSpherePos, boundingSphereRad] =
+		tl2::bounding_sphere<t_vec3_gl>(triagverts);
+
+	QMutexLocker _locker{&m_mutexObj};
+
+	auto obj = CreateTriangleObject(std::get<0>(solid),
+		triagverts, norms, tl2::create<t_vec_gl>({ r,g,b,a }),
+		false, &uvs);
+	obj.m_mat = tl2::get_arrow_matrix<t_vec_gl, t_mat_gl, t_real_gl>(
+		tl2::create<t_vec_gl>({1, 0, 0}), 1.,
+		tl2::create<t_vec_gl>({x, y, z}),
+		tl2::create<t_vec_gl>({0, 0, 1}));
+	obj.m_boundingSpherePos = std::move(boundingSpherePos);
+	obj.m_boundingSphereRad = boundingSphereRad;
+	obj.m_label_pos = tl2::create<t_vec3_gl>({0., 0., 0.75});
+	m_objs.emplace_back(std::move(obj));
+
+	return m_objs.size() - 1;		// object handle
+}
+
+
+std::size_t GlPlotRenderer::AddPlane(
+	t_real_gl nx, t_real_gl ny, t_real_gl nz,
+	t_real_gl x, t_real_gl y, t_real_gl z,
+	t_real_gl size1, t_real_gl size2,
+	t_real_gl r, t_real_gl g, t_real_gl b, t_real_gl a,
+	bool in_xz)
+{
+	t_vec3_gl norm = tl2::create<t_vec3_gl>({ nx, ny, nz });
+	norm /= tl2::norm<t_vec3_gl>(norm);
+
+	auto solid = tl2::create_plane<t_mat_gl, t_vec3_gl>(norm, size1, size2, in_xz);
+	auto [triagverts, norms, uvs] = tl2::create_triangles<t_vec3_gl>(solid);
+	auto [boundingSpherePos, boundingSphereRad] =
+		tl2::bounding_sphere<t_vec3_gl>(triagverts);
+
+	QMutexLocker _locker{&m_mutexObj};
+
+	auto obj = CreateTriangleObject(std::get<0>(solid),
+		triagverts, norms, tl2::create<t_vec_gl>({ r, g, b, a }),
+		false, &uvs);
+	obj.m_mat = tl2::hom_translation<t_mat_gl>(x, y, z);
+	obj.m_boundingSpherePos = std::move(boundingSpherePos);
+	obj.m_boundingSphereRad = boundingSphereRad;
+	m_objs.emplace_back(std::move(obj));
+
+	return m_objs.size() - 1;		// object handle
+}
+
+
+std::size_t GlPlotRenderer::AddRectangle(const t_vec3_gl& pt_lb, const t_vec3_gl& pt_lt,
+	const t_vec3_gl& pt_rt, const t_vec3_gl& pt_rb,
+	t_real_gl r, t_real_gl g, t_real_gl b, t_real_gl a)
+{
+	auto solid = tl2::create_rectangle<t_vec3_gl>(pt_lb, pt_lt, pt_rt, pt_rb);
+	auto [triagverts, norms, uvs] = tl2::create_triangles<t_vec3_gl>(solid);
+	auto [boundingSpherePos, boundingSphereRad] =
+		tl2::bounding_sphere<t_vec3_gl>(triagverts);
+
+	QMutexLocker _locker{&m_mutexObj};
+
+	auto obj = CreateTriangleObject(std::get<0>(solid),
+		triagverts, norms, tl2::create<t_vec_gl>({ r, g, b, a }),
+		false, &uvs);
+	obj.m_mat = tl2::unit<t_mat_gl>(4);
+	obj.m_boundingSpherePos = std::move(boundingSpherePos);
+	obj.m_boundingSphereRad = boundingSphereRad;
+	m_objs.emplace_back(std::move(obj));
+
+	return m_objs.size() - 1;		// object handle
+}
+
+
+std::size_t GlPlotRenderer::AddPatch(
+	std::function<std::pair<t_real_gl, bool>(
+		t_real_gl, t_real_gl, std::size_t, std::size_t)> fkt,
+	t_real_gl x, t_real_gl y, t_real_gl z,
+	t_real_gl w, t_real_gl h, std::size_t pts_x, std::size_t pts_y,
+	t_real_gl r, t_real_gl g, t_real_gl b, t_real_gl a)
+{
+	using t_fkt = std::function<std::pair<t_real_gl, bool>(t_real_gl, t_real_gl, std::size_t, std::size_t)>;
+
+	auto solid = tl2::create_patch<t_fkt, t_mat_gl, t_vec3_gl>(fkt, w, h, pts_x, pts_y);
+	auto [verts, norms, uvs] = tl2::create_triangles<t_vec3_gl>(solid);
+	auto [boundingSpherePos, boundingSphereRad] =
+		tl2::bounding_sphere<t_vec3_gl>(verts);
+
+	QMutexLocker _locker{&m_mutexObj};
+
+	auto obj = CreateTriangleObject(std::get<0>(solid),
+		verts, norms, tl2::create<t_vec_gl>({ r, g, b, a }),
+		false, &uvs);
+	obj.m_mat = tl2::hom_translation<t_mat_gl>(x, y, z);
+	obj.m_boundingSpherePos = std::move(boundingSpherePos);
+	obj.m_boundingSphereRad = boundingSphereRad;
+	m_objs.emplace_back(std::move(obj));
+
+	return m_objs.size() - 1;		// object handle
+}
+
+
+std::size_t GlPlotRenderer::AddLine(
+	std::function<std::pair<t_real_gl, bool>(t_real_gl, std::size_t)> fkt,
+	t_real_gl x, t_real_gl y, t_real_gl z,
+	t_real_gl w, std::size_t pts_x,
+	t_real_gl r, t_real_gl g, t_real_gl b, t_real_gl a,
+	t_real_gl pt_y, bool flip_xy)
+{
+	using t_fkt = std::function<std::pair<t_real_gl, bool>(t_real_gl, std::size_t)>;
+
+	auto verts = tl2::create_line<t_fkt, t_mat_gl, t_vec3_gl>(fkt, w, pts_x, pt_y, flip_xy);
+	auto [boundingSpherePos, boundingSphereRad] =
+		tl2::bounding_sphere<t_vec3_gl>(verts);
+
+	QMutexLocker _locker{&m_mutexObj};
+
+	auto obj = CreateLineObject(verts, tl2::create<t_vec_gl>({ r, g, b, a }));
+	obj.m_mat = tl2::hom_translation<t_mat_gl>(x, y, z);
+	obj.m_boundingSpherePos = std::move(boundingSpherePos);
+	obj.m_boundingSphereRad = boundingSphereRad;
+	m_objs.emplace_back(std::move(obj));
+
+	return m_objs.size() - 1;		// object handle
+}
+
+
+std::size_t GlPlotRenderer::AddTriangleObject(
+	const std::vector<t_vec3_gl>& triag_verts,
+	const std::vector<t_vec3_gl>& triag_norms,
+	t_real_gl r, t_real_gl g, t_real_gl b, t_real_gl a)
+{
+	auto [boundingSpherePos, boundingSphereRad] =
+		tl2::bounding_sphere<t_vec3_gl>(triag_verts);
+
+	QMutexLocker _locker{&m_mutexObj};
+
+	auto obj = CreateTriangleObject(triag_verts, triag_verts,
+		triag_norms, tl2::create<t_vec_gl>({ r, g, b, a }),
+		false, nullptr);
+	obj.m_mat = tl2::hom_translation<t_mat_gl, t_real_gl>(0., 0., 0.);
+	obj.m_boundingSpherePos = std::move(boundingSpherePos);
+	obj.m_boundingSphereRad = boundingSphereRad;
+	obj.m_label_pos = tl2::create<t_vec3_gl>({0., 0., 0.75});
+	m_objs.emplace_back(std::move(obj));
+
+	return m_objs.size() - 1;		// object handle
+}
+
+
+std::size_t GlPlotRenderer::AddLineObject(
+	const std::vector<t_vec3_gl>& verts,
+	t_real_gl r, t_real_gl g, t_real_gl b, t_real_gl a)
+{
+	QMutexLocker _locker{&m_mutexObj};
+
+	auto obj = CreateLineObject(verts, tl2::create<t_vec_gl>({ r, g, b, a }));
+	m_objs.emplace_back(std::move(obj));
+
+	return m_objs.size() - 1;  // object handle
+}
+
+
+std::size_t GlPlotRenderer::AddCoordinateCross(t_real_gl min, t_real_gl max)
+{
+	auto col = tl2::create<t_vec_gl>({ 0, 0, 0, 1 });
+	auto verts = std::vector<t_vec3_gl>
+	{{
+		tl2::create<t_vec3_gl>({ min, 0, 0 }), tl2::create<t_vec3_gl>({ max, 0, 0 }),
+		tl2::create<t_vec3_gl>({ 0, min, 0 }), tl2::create<t_vec3_gl>({ 0, max, 0 }),
+		tl2::create<t_vec3_gl>({ 0, 0,min }), tl2::create<t_vec3_gl>({ 0, 0,max }),
+	}};
+
+	QMutexLocker _locker{&m_mutexObj};
+
+	auto obj = CreateLineObject(verts, col);
+	obj.m_invariant = true;
+	m_objs.emplace_back(std::move(obj));
+
+	return m_objs.size() - 1;  // object handle
+}
+
+
+std::vector<std::size_t> GlPlotRenderer::AddCoordinateCube(t_real_gl min, t_real_gl max)
+{
+	t_real_gl w = max - min;
+	auto objs = AddCuboidFaces(1., 1., 1.,  0., 0., 0.,  0.75, 0.75, 0.75, 1., true);
+
+	for(auto obj : objs)
+	{
+		SetObjectMatrix(obj, hom_scaling<t_mat_gl>(w, w, w));
+		SetObjectIntersectable(obj, false);
+		SetObjectInvariant(obj, true);
+		SetObjectForceCull(obj, true);
+		SetObjectCullBack(obj, false);
+		SetObjectLighting(obj, 2);
+	}
+
+	return objs;  // object handles
+}
+
+
+/**
+ * calculate a possible tick spacing
+ */
+std::pair<t_real_gl, t_real_gl>
+GlPlotRenderer::CalcTickMarks(t_real_gl min, t_real_gl max, t_real_gl tick_delta)
+{
+	if(tick_delta <= 0.)  // calculate tick spacing if none given
+	{
+		t_real_gl range = max - min;
+		if(!tl2::equals_0(range))
+		{
+			int power = static_cast<int>(std::log10(std::abs(range)));
+			tick_delta = std::pow(10., power);
+		}
+		else
+		{
+			tick_delta = 1e-4;
+		}
+
+		// if there's too little ticks, decrease the delta
+		if(range / tick_delta < 3.)
+			tick_delta /= 5.;
+
+		// if there's too many ticks, increase the delta
+		if(range / tick_delta > 4.)
+			tick_delta *= 2.;
+	}
+
+	t_real_gl start = std::floor(min / tick_delta)*tick_delta;
+
+	return std::make_pair(tick_delta, start);
+};
+
+
+/**
+ * transform coordinate component into a [0, 1] range
+ *
+ *   min + (max - min)*lam = val
+ *   (max - min)*lam       = val - min
+ *               lam       = (val - min) / (max - min)
+ */
+t_real_gl GlPlotRenderer::TickTrafo(t_real_gl min, t_real_gl max, t_real_gl val)
+{
+	if(tl2::equals_0(max - min))
+		return 0.;
+	return (val - min) / (max - min);
+};
+
+
+/**
+ * create the coordinate tick textures
+ */
+void GlPlotRenderer::UpdateCoordCubeTextures(
+	t_real_gl x_min, t_real_gl x_max, t_real_gl x_tick,
+	t_real_gl y_min, t_real_gl y_max, t_real_gl y_tick,
+	t_real_gl z_min, t_real_gl z_max, t_real_gl z_tick)
+{
+	m_coordCubeRanges[0] = x_min;
+	m_coordCubeRanges[1] = x_max;
+	m_coordCubeRanges[2] = y_min;
+	m_coordCubeRanges[3] = y_max;
+	m_coordCubeRanges[4] = z_min;
+	m_coordCubeRanges[5] = z_max;
+	m_coordCubeTicks[0] = x_tick;
+	m_coordCubeTicks[1] = y_tick;
+	m_coordCubeTicks[2] = z_tick;
+
+	if(!m_pPlot || m_coordCubeLab.size() != 6)
+		return;
+
+	for(std::size_t idx : m_coordCubeLab)
+	{
+		GlRenderObj *obj = GetObject(idx);
+		if(!obj)
+			return;
+	}
+
+	int texture_width = 1024;
+	int texture_height = 1024;
+
+	auto draw_texture = [this, texture_width, texture_height](
+		GlRenderObj* obj,
+		t_real_gl x_min, t_real_gl x_max, t_real_gl x_tick,
+		t_real_gl y_min, t_real_gl y_max, t_real_gl y_tick,
+		bool pos_x = true, bool pos_y = true,
+		const std::string& label = "")
+	{
+		if(texture_width <= 0 || texture_height <= 0)
+			return;
+
+		QImage img{texture_width, texture_height, QImage::Format_RGB32};
+		img.fill(0xffffffff);
+
+		QPen pen{QColor{0x00, 0x00, 0x00}};
+		pen.setWidthF(4.);
+
+		QPainter painter{&img};
+		painter.setFont(m_font);
+		painter.setPen(pen);
+
+		if(x_min > x_max)
+			std::swap(x_min, x_max);
+		if(y_min > y_max)
+			std::swap(y_min, y_max);
+
+		t_real_gl x_start = 0., y_start = 0.;
+		std::tie(x_tick, x_start) = CalcTickMarks(x_min, x_max, x_tick);
+		std::tie(y_tick, y_start) = CalcTickMarks(y_min, y_max, y_tick);
+
+		// lines in y direction
+		for(t_real_gl x = x_start; x <= x_max; x += x_tick)
+		{
+			t_real_gl x_img = TickTrafo(x_min, x_max, x) * t_real_gl(texture_width);
+			t_real_gl y_img_min = 0.;
+			t_real_gl y_img_max = t_real_gl(texture_height);
+			if(!pos_x)
+				x_img = texture_width - x_img;
+			painter.drawLine(QLineF{QPointF{x_img, y_img_min}, QPointF{x_img, y_img_max}});
+		}
+
+		// lines in x direction
+		for(t_real_gl y = y_start; y <= y_max; y += y_tick)
+		{
+			t_real_gl y_img = TickTrafo(y_min, y_max, y) * t_real_gl(texture_height);
+			t_real_gl x_img_min = 0.;
+			t_real_gl x_img_max = t_real_gl(texture_width);
+			if(!pos_y)
+				y_img = texture_height - y_img;
+			painter.drawLine(QLineF{QPointF{x_img_min, y_img}, QPointF{x_img_max, y_img}});
+		}
+
+		if(label != "")
+			painter.drawText(512., 512., label.c_str());
+
+		m_pPlot->makeCurrent();
+		BOOST_SCOPE_EXIT(m_pPlot) { m_pPlot->doneCurrent(); } BOOST_SCOPE_EXIT_END
+		obj->m_texture = std::make_shared<QOpenGLTexture>(img);
+	};
+
+	constexpr const bool dbg = false;
+	draw_texture(GetObject(m_coordCubeLab[0]),
+		x_min, x_max, x_tick, y_min, y_max, y_tick,
+		true, false, dbg ? "-z" : ""); // -z
+	draw_texture(GetObject(m_coordCubeLab[1]),
+		x_min, x_max, x_tick, y_min, y_max, y_tick,
+		true, true, dbg ? "+z" : ""); // +z
+	draw_texture(GetObject(m_coordCubeLab[2]),
+		x_min, x_max, x_tick, z_min, z_max, z_tick,
+		false, false, dbg ? "-y" : ""); // -y
+	draw_texture(GetObject(m_coordCubeLab[3]),
+		x_min, x_max, x_tick, z_min, z_max, z_tick,
+		true, false, dbg ? "+y" : ""); // +y
+	draw_texture(GetObject(m_coordCubeLab[4]),
+		y_min, y_max, y_tick, z_min, z_max, z_tick,
+		true, false, dbg ? "-x" : ""); // -x
+	draw_texture(GetObject(m_coordCubeLab[5]),
+		y_min, y_max, y_tick, z_min, z_max, z_tick,
+		false, false, dbg ? "+x" : ""); // +x
+}
+
+
+void GlPlotRenderer::initialiseGL()
+{
+	// --------------------------------------------------------------------
+	// shaders
+	// --------------------------------------------------------------------
+	std::string strFragShader = R"RAW(#version ${GLSL_VERSION}
+
+// ----------------------------------------------------------------------------
+// inputs and outputs
+// ----------------------------------------------------------------------------
+in vec4 fragpos;
+in vec4 fragnorm;
+in vec4 fragcol;
+in vec2 fragtexcoords;
+
+out vec4 outcol;
+// ----------------------------------------------------------------------------
+
+
+// ----------------------------------------------------------------------------
+// texture
+// ----------------------------------------------------------------------------
+uniform bool texture_active = false;
+uniform sampler2D texture_index;
+// ----------------------------------------------------------------------------
+
+
+// ----------------------------------------------------------------------------
+// lighting
+// ----------------------------------------------------------------------------
+uniform vec4 const_col    = vec4(1, 1, 1, 1);
+uniform vec3 light_pos[]  = vec3[](
+	vec3(5, 5, 5),
+	vec3(0, 0, 0),
+	vec3(0, 0, 0),
+	vec3(0, 0, 0)
+);
+uniform int active_lights = 1;	// how many lights to use?
+
+float g_diffuse   = 1.;
+float g_specular  = 0.25;
+float g_shininess = 1.;
+float g_ambient   = 0.2;
+// ----------------------------------------------------------------------------
+
+
+// ----------------------------------------------------------------------------
+// transformations
+// ----------------------------------------------------------------------------
+uniform mat4 cam     = mat4(1.);
+uniform mat4 cam_inv = mat4(1.);
+uniform mat4 obj     = mat4(1.);
+uniform int lighting = 1;
+// ----------------------------------------------------------------------------
+
+
+/**
+ * reflect a vector on a surface with normal n
+ *  => subtract the projection vector twice: 1 - 2*|n><n|
+ * @see (Arens 2015), p. 710
+ */
+mat3 reflect(vec3 n)
+{
+	mat3 refl = mat3(1.) - 2.*outerProduct(n, n);
+
+	// have both vectors point away from the surface
+	return -refl;
+}
+
+
+/**
+ * position of the camera
+ */
+vec3 get_campos()
+{
+	vec4 trans = -vec4(cam[3].xyz, 0);
+	return (cam_inv*trans).xyz;
+}
+
+
+/**
+ * phong lighting model
+ * @see https://en.wikipedia.org/wiki/Phong_reflection_model
+ */
+float phong_lighting(vec4 objVert, vec4 objNorm)
+{
+	float I_diff = 0.;
+	float I_spec = 0.;
+
+
+	vec3 dirToCam;
+	// only used for specular lighting
+	if(g_specular > 0.)
+		dirToCam = normalize(get_campos() - objVert.xyz);
+
+
+	// iterate (active) light sources
+	for(int lightidx = 0; lightidx < min(light_pos.length(), active_lights); ++lightidx)
+	{
+		// diffuse lighting
+		vec3 dirLight = normalize(light_pos[lightidx] - objVert.xyz);
+
+		if(g_diffuse > 0.)
+		{
+			float I_diff_inc = g_diffuse * dot(objNorm.xyz, dirLight);
+			if(I_diff_inc < 0.)
+				I_diff_inc = 0.;
+			I_diff += I_diff_inc;
+		}
+
+
+		// specular lighting
+		if(g_specular > 0.)
+		{
+			if(dot(dirToCam, objNorm.xyz) > 0.)
+			{
+				vec3 dirLightRefl = reflect(objNorm.xyz) * dirLight;
+
+				float val = dot(dirToCam, dirLightRefl);
+				if(val > 0.)
+				{
+					float I_spec_inc = g_specular * pow(val, g_shininess);
+					if(I_spec_inc < 0.)
+						I_spec_inc = 0.;
+					I_spec += I_spec_inc;
+				}
+			}
+		}
+	}
+
+
+	// ambient lighting
+	float I_amb = g_ambient;
+
+
+	// total intensity
+	return I_diff + I_spec + I_amb;
+}
+
+
+/**
+ * simple flat lighting model
+ */
+float flat_lighting(vec4 objNorm)
+{
+	// choose colours bases on normal components
+	const vec3 dir_cols = vec3(1., 0.9, 0.8);
+
+	return abs(dot(objNorm.xyz, dir_cols));
+}
+
+
+void main()
+{
+	outcol = vec4(1, 1, 1, 1);
+
+	if(texture_active)
+		outcol = texture(texture_index, fragtexcoords);
+
+	float I = 1.;
+	if(lighting == 1)
+		I = phong_lighting(fragpos, fragnorm);
+	else if(lighting == 2)
+		I = flat_lighting(fragnorm);
+
+	outcol *= fragcol;
+	outcol.rgb *= I;
+	outcol *= const_col;
+})RAW";
+	// --------------------------------------------------------------------
+
+
+	// --------------------------------------------------------------------
+	std::string strVertexShader = R"RAW(#version ${GLSL_VERSION}
+
+
+// ----------------------------------------------------------------------------
+// inputs and outputs
+// ----------------------------------------------------------------------------
+in vec4 vertex;
+in vec4 normal;
+in vec4 vertex_col;
+in vec2 texture_coords;
+
+out vec4 fragcol;
+out vec4 fragpos;
+out vec4 fragnorm;
+out vec2 fragtexcoords;
+// ----------------------------------------------------------------------------
+
+
+const float pi = ${PI};
+
+
+// ----------------------------------------------------------------------------
+// transformations
+// ----------------------------------------------------------------------------
+uniform mat4 proj     = mat4(1.);  // projection matrix
+uniform mat4 cam      = mat4(1.);  // camera transformation matrix
+uniform mat4 cam_inv  = mat4(1.);  // inverse camera transformation matrix
+uniform mat4 obj      = mat4(1.);  // object transformation matrix
+uniform mat4 obj_cam  = mat4(1.);  // additional trafo when invariant to camera translation
+uniform mat4 obj_proj = mat4(1.);  // additional trafo when invariant to camera translation
+uniform mat4 trafoA   = mat4(1.);  // crystal matrix
+uniform mat4 trafoB   = mat4(1.);  // B = 2 pi / A
+
+uniform int is_real_space = 1;     // real or reciprocal space
+uniform int coordsys      = 0;     // 0: crystal system, 1: lab system
+uniform int cam_invar     = 0;     // object is invariant to camera translation
+// ----------------------------------------------------------------------------
+
+
+void main()
+{
+	mat4 coordTrafo = mat4(1.);
+	mat4 coordTrafo_inv = mat4(1.);
+
+	if(coordsys == 1 && is_real_space == 1)
+	{
+		coordTrafo = trafoA;
+		coordTrafo_inv = trafoB / (2.*pi);
+		coordTrafo_inv[3][3] = 1.;
+	}
+	else if(coordsys == 1 && is_real_space == 0)
+	{
+		coordTrafo = trafoB;
+		coordTrafo_inv = trafoA / (2.*pi);
+		coordTrafo_inv[3][3] = 1.;
+	}
+
+	// coordTrafo_inv is needed so not to distort the object
+	vec4 objPos = coordTrafo * obj * coordTrafo_inv * vertex;
+	vec4 objNorm = normalize(coordTrafo * obj * coordTrafo_inv * normal);
+
+	if(cam_invar != 0)
+	{
+		mat4 cam_rot = cam;
+		cam_rot[3][0] = cam_rot[3][1] = cam_rot[3][2] = 0.;
+		cam_rot[0][3] = cam_rot[1][3] = cam_rot[2][3] = 0.;
+
+		gl_Position = obj_proj * proj * obj_cam * cam_rot * objPos;
+	}
+	else
+	{
+		gl_Position = /*obj_proj **/ proj * /*obj_cam **/ cam * objPos;
+	}
+
+	fragpos = objPos;
+	fragnorm = objNorm;
+	fragcol = vertex_col;
+	fragtexcoords = texture_coords;
+})RAW";
+// --------------------------------------------------------------------
+
+
+	// set glsl version and constants
+	const std::string strGlsl = std::to_string(_GLSL_MAJ_VER*100 + _GLSL_MIN_VER*10);
+	std::string strPi = std::to_string(tl2::pi<t_real_gl>);	      // locale-dependent !
+	algo::replace_all(strPi, std::string(","), std::string(".")); // ensure decimal point
+
+	for(std::string* strSrc : { &strFragShader, &strVertexShader })
+	{
+		algo::replace_all(*strSrc, std::string("${GLSL_VERSION}"), strGlsl);
+		algo::replace_all(*strSrc, std::string("${PI}"), strPi);
+	}
+
+
+	// GL functions
+	auto *pGl = GetGlFunctions();
+	if(!pGl)
+		return;
+	LOGGLERR(pGl);
+
+	m_strGlVer = (char*)pGl->glGetString(GL_VERSION);
+	m_strGlShaderVer = (char*)pGl->glGetString(GL_SHADING_LANGUAGE_VERSION);
+	m_strGlVendor = (char*)pGl->glGetString(GL_VENDOR);
+	m_strGlRenderer = (char*)pGl->glGetString(GL_RENDERER);
+	LOGGLERR(pGl);
+
+
+	// shaders
+	{
+		static QMutex shadermutex;
+		shadermutex.lock();
+		BOOST_SCOPE_EXIT(&shadermutex) { shadermutex.unlock(); } BOOST_SCOPE_EXIT_END
+
+		// shader compiler/linker error handler
+		auto shader_err = [this](const char* err) -> void
+		{
+			std::cerr << err << std::endl;
+
+			std::string strLog = m_pShaders->log().toStdString();
+			if(strLog.size())
+				std::cerr << "Shader log: " << strLog << std::endl;
+		};
+
+		// compile & link shaders
+		m_pShaders = std::make_shared<QOpenGLShaderProgram>(this);
+
+		if(!m_pShaders->addShaderFromSourceCode(QOpenGLShader::Fragment, strFragShader.c_str()))
+		{
+			shader_err("Cannot compile fragment shader.");
+			return;
+		}
+		if(!m_pShaders->addShaderFromSourceCode(QOpenGLShader::Vertex, strVertexShader.c_str()))
+		{
+			shader_err("Cannot compile vertex shader.");
+			return;
+		}
+
+		if(!m_pShaders->link())
+		{
+			shader_err("Cannot link shaders.");
+			return;
+		}
+
+		// uniforms
+		m_uniMatrixCam = m_pShaders->uniformLocation("cam");
+		m_uniMatrixCamInv = m_pShaders->uniformLocation("cam_inv");
+		m_uniMatrixProj = m_pShaders->uniformLocation("proj");
+		m_uniMatrixObj = m_pShaders->uniformLocation("obj");
+		m_uniMatrixObjCam = m_pShaders->uniformLocation("obj_cam");
+		m_uniMatrixObjAfterProj = m_pShaders->uniformLocation("obj_proj");
+		m_uniMatrixA = m_pShaders->uniformLocation("trafoA");
+		m_uniMatrixB = m_pShaders->uniformLocation("trafoB");
+		m_uniIsRealSpace = m_pShaders->uniformLocation("is_real_space");
+		m_uniCoordSys = m_pShaders->uniformLocation("coordsys");
+		m_uniCamInvar = m_pShaders->uniformLocation("cam_invar");
+		m_uniConstCol = m_pShaders->uniformLocation("const_col");
+		m_uniLightPos = m_pShaders->uniformLocation("light_pos");
+		m_uniNumActiveLights = m_pShaders->uniformLocation("active_lights");
+		m_uniLighting = m_pShaders->uniformLocation("lighting");
+		m_uniTextureActive = m_pShaders->uniformLocation("texture_active");
+		m_uniTextureIndex = m_pShaders->uniformLocation("texture_index");
+
+		// attributes
+		m_attrVertex = m_pShaders->attributeLocation("vertex");
+		m_attrVertexNorm = m_pShaders->attributeLocation("normal");
+		m_attrVertexCol = m_pShaders->attributeLocation("vertex_col");
+		m_attrTexCoords = m_pShaders->attributeLocation("texture_coords");
+	}
+	LOGGLERR(pGl);
+
+
+	// 3d coordinate system objects
+	if(!tl2::equals_0(m_CoordMax))
+	{
+		m_coordCrossLab = AddCoordinateCross(-m_CoordMax, m_CoordMax);
+		m_coordCrossXtal = AddCoordinateCross(-m_CoordMax, m_CoordMax);
+		m_coordCubeLab = AddCoordinateCube(-m_CoordMax, m_CoordMax);
+		SetObjectVisible(*m_coordCrossLab, true);
+		SetObjectVisible(*m_coordCrossXtal, false);
+		for(std::size_t i = 0; i <  m_coordCubeLab.size(); ++i)
+			SetObjectVisible(m_coordCubeLab[i], false);
+	}
+	else
+	{
+		std::cerr << "GL error: Invalid coordinate axis extents." << std::endl;
+	}
+
+	// check if context is valid
+	auto *pContext = ((QOpenGLWidget*)m_pPlot)->context();
+	if(!pContext || !pContext->isValid())
+	{
+		std::cerr << "GL error: Invalid context." << std::endl;
+		return;
+	}
+
+	// check threading compatibility
+	if constexpr(m_isthreaded)
+	{
+		if(!pContext->supportsThreadedOpenGL())
+		{
+			std::cerr << "GL error: Threading is not supported on this platform." << std::endl;
+			return;
+		}
+	}
+
+	m_initialised = true;
+}
+
+
+void GlPlotRenderer::SetScreenDims(int w, int h)
+{
+	m_cam.SetScreenDimensions(w, h);
+	m_viewport_needs_update = true;
+}
+
+
+void GlPlotRenderer::UpdateViewport()
+{
+	if(!m_initialised)
+		return;
+
+	const auto [w, h] = m_cam.GetScreenDimensions();
+	const auto [z_near, z_far] = m_cam.GetDepthRange();
+
+	if(auto *pContext = ((QOpenGLWidget*)m_pPlot)->context();
+		!pContext || !pContext->isValid())
+		return;
+	auto *pGl = GetGlFunctions();
+	if(!pGl)
+		return;
+
+	m_cam.UpdateViewport();
+	m_cam.UpdatePerspective();
+
+	pGl->glViewport(0, 0, w, h);
+	pGl->glDepthRange(z_near, z_far);
+	pGl->glClearDepth(z_far);
+	pGl->glDepthFunc(GL_LEQUAL);
+
+	// bind shaders
+	m_pShaders->bind();
+	BOOST_SCOPE_EXIT(m_pShaders) { m_pShaders->release(); } BOOST_SCOPE_EXIT_END
+	LOGGLERR(pGl);
+
+	// set matrices
+	m_pShaders->setUniformValue(m_uniMatrixCam, m_cam.GetTransformation());
+	m_pShaders->setUniformValue(m_uniMatrixCamInv, m_cam.GetInverseTransformation());
+	m_pShaders->setUniformValue(m_uniMatrixProj, m_cam.GetPerspective());
+	LOGGLERR(pGl);
+
+	m_viewport_needs_update = false;
+}
+
+
+void GlPlotRenderer::RequestViewportUpdate()
+{
+	if constexpr(!m_isthreaded)
+		UpdateViewport();
+	else
+		m_viewport_needs_update = true;
+}
+
+
+/**
+ * set up a (crystal) B matrix
+ */
+void GlPlotRenderer::SetBTrafo(const t_mat_gl& matB, const t_mat_gl* matA, bool is_real_space)
+{
+	m_matB = matB;
+	m_is_real_space = is_real_space;
+
+	// if A matix is not given, calculate it
+	if(matA)
+	{
+		m_matA = *matA;
+	}
+	else
+	{
+		bool ok = true;
+		std::tie(m_matA, ok) = tl2::inv(m_matB);
+		if(!ok)
+		{
+			m_matA = tl2::unit<t_mat_gl>();
+			std::cerr << "GL error: Cannot invert B matrix." << std::endl;
+		}
+		else
+		{
+			m_matA *= t_real_gl(2)*tl2::pi<t_real_gl>;
+			m_matA(3,3) = 1;
+		}
+	}
+
+	if(m_coordCrossXtal)
+		SetObjectMatrix(*m_coordCrossXtal, m_matB);
+
+	m_Btrafo_needs_update = true;
+	RequestPlotUpdate();
+}
+
+
+void GlPlotRenderer::SetCoordSys(int iSys)
+{
+	m_coordsys = iSys;
+	RequestPlotUpdate();
+}
+
+
+/**
+ * update the shader's B matrix
+ */
+void GlPlotRenderer::UpdateBTrafo()
+{
+	m_pShaders->setUniformValue(m_uniMatrixA, m_matA);
+	m_pShaders->setUniformValue(m_uniMatrixB, m_matB);
+	m_pShaders->setUniformValue(m_uniIsRealSpace, m_is_real_space ? 1 : 0);
+
+	m_Btrafo_needs_update = false;
+}
+
+
+void GlPlotRenderer::UpdateCam()
+{
+	m_cam.UpdateTransformation();
+
+	m_picker_needs_update = true;
+	RequestPlotUpdate();
+
+	emit CameraHasUpdated();
+}
+
+
+/**
+ * request a plot update
+ */
+void GlPlotRenderer::RequestPlotUpdate()
+{
+	if(!IsInitialised())
+		return;
+
+	QMetaObject::invokeMethod((QOpenGLWidget*)m_pPlot,
+		static_cast<void (QOpenGLWidget::*)()>(&QOpenGLWidget::update),
+		Qt::ConnectionType::QueuedConnection);
+}
+
+
+void GlPlotRenderer::SetLight(std::size_t idx, const t_vec3_gl& pos)
+{
+	if(m_lights.size() < idx + 1)
+		m_lights.resize(idx + 1);
+
+	m_lights[idx] = pos;
+	m_lights_need_update = true;
+}
+
+
+void GlPlotRenderer::UpdateLights()
+{
+	if(!IsInitialised())
+		return;
+
+	constexpr int MAX_LIGHTS = 4;	// max. number allowed in shader
+
+	int num_lights = std::min(MAX_LIGHTS, static_cast<int>(m_lights.size()));
+	auto pos = std::make_unique<t_real_gl[]>(num_lights * 3);
+
+	for(int i = 0; i < num_lights; ++i)
+	{
+		pos[i*3 + 0] = m_lights[i][0];
+		pos[i*3 + 1] = m_lights[i][1];
+		pos[i*3 + 2] = m_lights[i][2];
+	}
+
+	m_pShaders->setUniformValueArray(m_uniLightPos, pos.get(), num_lights, 3);
+	m_pShaders->setUniformValue(m_uniNumActiveLights, num_lights);
+
+	m_lights_need_update = false;
+}
+
+
+void GlPlotRenderer::EnablePicker(bool b)
+{
+	m_picker_enabled = b;
+}
+
+
+void GlPlotRenderer::UpdatePicker()
+{
+	if(!m_initialised || !m_picker_enabled)
+		return;
+
+	// picker ray
+	auto [org3, dir3] = m_cam.GetPickerRay(m_posMouse.x(), m_posMouse.y());
+
+
+	// intersection with unit sphere around origin
+	bool hasSphereInters = false;
+	t_vec_gl vecClosestSphereInters = tl2::create<t_vec_gl>({ 0, 0, 0, 0 });
+
+	auto intersUnitSphere =
+		tl2::intersect_line_sphere<t_vec3_gl, std::vector>(org3, dir3,
+			tl2::create<t_vec3_gl>({0,0,0}), t_real_gl(m_pickerSphereRadius));
+	for(const auto& result : intersUnitSphere)
+	{
+		t_vec_gl vecInters4 = tl2::create<t_vec_gl>(
+			{ result[0], result[1], result[2], 1 });
+
+		if(!hasSphereInters)
+		{	// first intersection
+			vecClosestSphereInters = vecInters4;
+			hasSphereInters = true;
+		}
+		else
+		{	// test if next intersection is closer...
+			t_vec_gl oldPosTrafo = m_cam.GetTransformation() * vecClosestSphereInters;
+			t_vec_gl newPosTrafo = m_cam.GetTransformation() * vecInters4;
+
+			// ... it is closer.
+			if(tl2::norm(newPosTrafo, false) < tl2::norm(oldPosTrafo, false))
+				vecClosestSphereInters = vecInters4;
+		}
+	}
+
+
+	// crystal or lab coordinate system?
+	const t_mat_gl matUnit = tl2::unit<t_mat_gl>();
+	const t_mat_gl *coordTrafo = &matUnit;
+	t_mat_gl coordTrafoInv = matUnit;
+	if(m_coordsys == 1)
+	{
+		coordTrafo = &m_matA;
+		coordTrafoInv = m_matB / (t_real_gl(2)*tl2::pi<t_real_gl>);
+		coordTrafoInv(3, 3) = 1;
+	}
+
+
+	// intersection with geometry
+	bool hasInters = false;
+	t_vec_gl vecClosestInters = tl2::create<t_vec_gl>({ 0, 0, 0, 0 });
+	std::size_t triagInters = 0xffffffff;  // intersecting triangle index
+	std::size_t objInters = 0xffffffff;  // intersecting object handle
+
+
+	QMutexLocker _locker{&m_mutexObj};
+
+	for(std::size_t curObj = 0; curObj < m_objs.size(); ++curObj)
+	{
+		const auto& obj = m_objs[curObj];
+		const GlRenderObj *linkedObj = &obj;
+		if(obj.linkedObj)
+			linkedObj = &m_objs[*obj.linkedObj];
+
+		if(linkedObj->m_type != GlRenderObjType::TRIANGLES ||
+			!obj.m_visible || !obj.m_valid || !obj.m_intersect)
+			continue;
+
+
+		const t_mat_gl& matTrafo = (*coordTrafo) * obj.m_mat * coordTrafoInv;
+
+		// scaling factor, TODO: maximum factor for non-uniform scaling
+		auto scale = std::abs(tl2::det(matTrafo));
+
+		// intersection with bounding sphere?
+		auto boundingInters =
+			tl2::intersect_line_sphere<t_vec3_gl, std::vector>(org3, dir3,
+				tl2::prod_mv(matTrafo, linkedObj->m_boundingSpherePos),
+				scale*linkedObj->m_boundingSphereRad);
+		if(boundingInters.size() == 0)
+			continue;
+
+
+		// test actual polygons for intersection
+		for(std::size_t startidx = 0; startidx + 2 < linkedObj->m_triangles.size(); startidx += 3)
+		{
+			std::vector<t_vec3_gl> poly{ {
+				linkedObj->m_triangles[startidx + 0],
+				linkedObj->m_triangles[startidx + 1],
+				linkedObj->m_triangles[startidx + 2]
+			} };
+
+			/*std::vector<t_vec3_gl> polyuv{ {
+				linkedObj->m_uvs[startidx+0],
+				linkedObj->m_uvs[startidx+1],
+				linkedObj->m_uvs[startidx+2]
+			} };*/
+
+
+			// coordTrafoInv only keeps 3d objects from locally distorting
+			auto [vecInters, bInters, lamInters] =
+				tl2::intersect_line_poly<t_vec3_gl, t_mat_gl>(
+					org3, dir3, poly, matTrafo);
+			if(!bInters)  // no intersection?
+				continue;
+			t_vec_gl vecInters4 = tl2::create<t_vec_gl>(
+				{ vecInters[0], vecInters[1], vecInters[2], 1 });
+
+			if(!hasInters)
+			{	// first intersection
+				vecClosestInters = vecInters4;
+				objInters = curObj;
+				triagInters = startidx / 3;
+				hasInters = true;
+			}
+			else
+			{	// test if next intersection is closer...
+				t_vec_gl oldPosTrafo = m_cam.GetTransformation() * vecClosestInters;
+				t_vec_gl newPosTrafo = m_cam.GetTransformation() * vecInters4;
+
+				if(tl2::norm(newPosTrafo, false) < tl2::norm(oldPosTrafo, false))
+				{	// ...it is closer
+					vecClosestInters = vecInters4;
+					objInters = curObj;
+					triagInters = startidx / 3;
+				}
+			}
+
+			// intersection point in uv coordinates:
+			//auto uv = tl2::poly_uv<t_mat_gl, t_vec3_gl>
+			//	(poly[0], poly[1], poly[2], polyuv[0], polyuv[1], polyuv[2], vecInters);
+		}
+	}
+
+	// create intersection points
+	m_picker_needs_update = false;
+	t_vec3_gl vecClosestInters3 = tl2::create<t_vec3_gl>(
+		{ vecClosestInters[0], vecClosestInters[1], vecClosestInters[2] });
+	t_vec3_gl vecClosestSphereInters3 = tl2::create<t_vec3_gl>(
+		{ vecClosestSphereInters[0], vecClosestSphereInters[1], vecClosestSphereInters[2] });
+
+	// report intersection
+	emit PickerIntersection(hasInters ? &vecClosestInters3 : nullptr,
+		objInters, triagInters,
+		hasSphereInters ? &vecClosestSphereInters3 : nullptr);
+}
+
+
+void GlPlotRenderer::mouseMoveEvent(const QPointF& pos)
+{
+	m_posMouse = pos;
+
+	if(m_in_rotation)
+	{
+		auto diff = m_posMouse - m_posMouseRotationStart;
+
+		m_cam.Rotate(
+			diff.x() / 180. * tl2::pi<t_real_gl>,
+			diff.y() / 180. * tl2::pi<t_real_gl>,
+			m_restrict_cam_theta);
+		UpdateCam();
+	}
+	else
+	{
+		// also automatically done in UpdateCam
+		m_picker_needs_update = true;
+		RequestPlotUpdate();
+	}
+}
+
+
+void GlPlotRenderer::zoom(t_real_gl val)
+{
+	m_cam.Zoom(val / 64.);
+	UpdateCam();
+}
+
+
+void GlPlotRenderer::ResetZoom()
+{
+	m_cam.SetZoom(1.);
+	UpdateCam();
+}
+
+
+void GlPlotRenderer::BeginRotation()
+{
+	if(!m_in_rotation)
+	{
+		m_posMouseRotationStart = m_posMouse;
+		m_in_rotation = true;
+	}
+}
+
+
+void GlPlotRenderer::EndRotation()
+{
+	if(m_in_rotation)
+	{
+		m_cam.SaveRotation();
+		m_in_rotation = false;
+	}
+}
+
+
+void GlPlotRenderer::tick()
+{
+	tick(std::chrono::milliseconds(1000 / 60));
+}
+
+
+void GlPlotRenderer::tick([[maybe_unused]] const std::chrono::milliseconds& ms)
+{
+	// TODO
+	UpdateCam();
+}
+
+
+/**
+ * pure gl drawing
+ */
+void GlPlotRenderer::DoPaintGL(qgl_funcs *pGl)
+{
+	if(!m_initialised || !pGl || thread() != QThread::currentThread())
+		return;
+
+	// options
+	pGl->glCullFace(GL_BACK);
+	pGl->glFrontFace(GL_CCW);
+	if(m_cull)
+		pGl->glEnable(GL_CULL_FACE);
+	else
+		pGl->glDisable(GL_CULL_FACE);
+
+	if(m_blend)
+	{
+		pGl->glEnable(GL_BLEND);
+		pGl->glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	}
+	else
+	{
+		pGl->glDisable(GL_BLEND);
+	}
+
+	pGl->glEnable(GL_MULTISAMPLE);
+	pGl->glEnable(GL_LINE_SMOOTH);
+	pGl->glEnable(GL_POLYGON_SMOOTH);
+	pGl->glHint(GL_LINE_SMOOTH_HINT, GL_NICEST);
+	pGl->glHint(GL_POLYGON_SMOOTH_HINT, GL_NICEST);
+
+	/*t_real_gl lwrange[2];
+	pGl->glGetFloatv(GL_SMOOTH_LINE_WIDTH_RANGE, lwrange);
+	pGl->glLineWidth(lwrange[1]);*/
+
+	// clear
+	pGl->glClearColor(1., 1., 1., 1.);
+	pGl->glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+	pGl->glEnable(GL_DEPTH_TEST);
+	pGl->glDepthMask(GL_TRUE);
+	LOGGLERR(pGl);
+
+
+	// bind shaders
+	m_pShaders->bind();
+	BOOST_SCOPE_EXIT(m_pShaders) { m_pShaders->release(); } BOOST_SCOPE_EXIT_END
+	LOGGLERR(pGl);
+
+	if(m_lights_need_update)
+		UpdateLights();
+	if(m_Btrafo_needs_update)
+		UpdateBTrafo();
+
+
+	// set cam matrix
+	m_pShaders->setUniformValue(m_uniMatrixCam, m_cam.GetTransformation());
+	m_pShaders->setUniformValue(m_uniMatrixCamInv, m_cam.GetInverseTransformation());
+	//tl2::niceprint(std::cout, m_cam.GetTransformation());
+
+
+	auto colOverride = tl2::create<t_vec_gl>({ 1, 1, 1, 1 });
+	auto colHighlight = tl2::create<t_vec_gl>({ 1, 1, 1, 1 });
+
+
+	// get rendering order
+	std::vector<std::size_t> obj_order(m_objs.size());
+	std::iota(obj_order.begin(), obj_order.end(), 0);
+	std::stable_sort(obj_order.begin(), obj_order.end(),
+		[this](std::size_t idx1, std::size_t idx2) -> bool
+		{
+			return m_objs[idx1].m_priority >= m_objs[idx2].m_priority;
+		});
+
+
+	// render triangle geometry
+	for(std::size_t obj_idx : obj_order)
+	{
+		const auto& obj = m_objs[obj_idx];
+
+		if(!obj.m_visible || !obj.m_valid)
+			continue;
+
+		const GlRenderObj *linkedObj = &obj;
+		if(obj.linkedObj)
+		{
+			// get linked object
+			linkedObj = &m_objs[*obj.linkedObj];
+
+			// override constant colour for linked object
+			if(obj.m_highlighted)
+				m_pShaders->setUniformValue(m_uniConstCol, colHighlight);
+			else
+				m_pShaders->setUniformValue(m_uniConstCol, obj.m_colour);
+		}
+		else
+		{
+			// set override colour to white for non-linked objects
+			m_pShaders->setUniformValue(m_uniConstCol, colOverride);
+		}
+
+		m_pShaders->setUniformValue(m_uniLighting, obj.m_lighting);
+
+
+		// texture
+		BOOST_SCOPE_EXIT(/*this_,*/ pGl, &obj)
+		{
+			if(obj.m_texture)
+			{
+				pGl->glActiveTexture(GL_TEXTURE0);
+				pGl->glBindTexture(GL_TEXTURE_2D, 0);
+				//GLuint tex_num = 0;
+				//pGl->glDeleteTextures(1, &tex_num);
+				obj.m_texture->release();
+			}
+		} BOOST_SCOPE_EXIT_END
+
+		if(obj.m_texture)
+		{
+			m_pShaders->setUniformValue(m_uniTextureActive, true);
+			m_pShaders->setUniformValue(m_uniTextureIndex, 0);
+
+			pGl->glActiveTexture(GL_TEXTURE0);
+			obj.m_texture->bind();
+			LOGGLERR(pGl);
+
+			// see: https://www.khronos.org/registry/OpenGL-Refpages/gl4/html/glTexParameter.xhtml
+			pGl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+			pGl->glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+		}
+		else
+		{
+			m_pShaders->setUniformValue(m_uniTextureActive, false);
+			m_pShaders->setUniformValue(m_uniTextureIndex, 0);
+		}
+
+
+		// force object culling?
+		if(obj.m_force_cull)
+			pGl->glEnable(GL_CULL_FACE);
+		BOOST_SCOPE_EXIT(this_, pGl, &obj)
+		{
+			if(obj.m_force_cull)
+			{
+				// set cull back to global default
+				if(this_->m_cull)
+					pGl->glEnable(GL_CULL_FACE);
+				else
+					pGl->glDisable(GL_CULL_FACE);
+			}
+		}
+		BOOST_SCOPE_EXIT_END
+
+		if(obj.m_cull_back)
+			pGl->glCullFace(GL_BACK);
+		else
+			pGl->glCullFace(GL_FRONT);
+
+		m_pShaders->setUniformValue(m_uniMatrixObj, obj.m_mat);
+		m_pShaders->setUniformValue(m_uniMatrixObjCam, obj.m_mat_after_cam);
+		m_pShaders->setUniformValue(m_uniMatrixObjAfterProj, obj.m_mat_after_proj);
+
+		// set to untransformed coordinate system if the object is invariant
+		m_pShaders->setUniformValue(m_uniCoordSys,
+			linkedObj->m_invariant ? 0 : m_coordsys.load());
+
+		// ignore camera translation
+		m_pShaders->setUniformValue(m_uniCamInvar, linkedObj->m_cam_invariant);
+
+
+		// main vertex array object
+		linkedObj->m_vertex_array->bind();
+
+		pGl->glEnableVertexAttribArray(m_attrVertex);
+		if(linkedObj->m_type == GlRenderObjType::TRIANGLES)
+		{
+			pGl->glEnableVertexAttribArray(m_attrVertexNorm);
+
+			if(linkedObj->m_uvs.size())
+				pGl->glEnableVertexAttribArray(m_attrTexCoords);
+			else
+				pGl->glDisableVertexAttribArray(m_attrTexCoords);
+		}
+		pGl->glEnableVertexAttribArray(m_attrVertexCol);
+		BOOST_SCOPE_EXIT(pGl, &m_attrVertex, &m_attrVertexNorm, &m_attrVertexCol, &m_attrTexCoords)
+		{
+			pGl->glDisableVertexAttribArray(m_attrVertexCol);
+			pGl->glDisableVertexAttribArray(m_attrVertexNorm);
+			pGl->glDisableVertexAttribArray(m_attrVertex);
+			pGl->glDisableVertexAttribArray(m_attrTexCoords);
+		}
+		BOOST_SCOPE_EXIT_END
+		LOGGLERR(pGl);
+
+
+		// draw object
+		if(linkedObj->m_type == GlRenderObjType::TRIANGLES)
+			pGl->glDrawArrays(GL_TRIANGLES, 0, linkedObj->m_triangles.size());
+		else if(linkedObj->m_type == GlRenderObjType::LINES)
+			pGl->glDrawArrays(GL_LINES, 0, linkedObj->m_vertices.size());
+		else
+			std::cerr << "GL error: Unknown plot object type." << std::endl;
+
+
+		LOGGLERR(pGl);
+	}
+
+	pGl->glDisable(GL_DEPTH_TEST);
+}
+
+
+/**
+ * directly draw on a qpainter
+ */
+void GlPlotRenderer::DoPaintNonGL(QPainter &painter)
+{
+	const t_mat_gl matUnit = tl2::unit<t_mat_gl>();
+
+	QFont fontOrig = painter.font();
+	QPen penOrig = painter.pen();
+
+	QPen penLabel(Qt::black);
+	painter.setPen(penLabel);
+	painter.setFont(m_font);
+
+
+	// draw coordinate system in orthogonal lab system in 1/A
+	auto objCoordCross = GetCoordCross(false);
+	if(objCoordCross && GetObjectVisible(*objCoordCross))
+	{
+		// coordinate labels
+		painter.drawText(GlToScreenCoords(tl2::create<t_vec_gl>({0., 0., 0., 1.})), "0");
+
+		for(t_real_gl f = -std::floor(m_CoordMax); f <= std::floor(m_CoordMax); f += 0.5)
+		{
+			if(tl2::equals<t_real_gl>(f, 0))
+				continue;
+
+			std::ostringstream ostrF;
+			ostrF << f;
+			painter.drawText(GlToScreenCoords(
+				tl2::create<t_vec_gl>({f, 0., 0., 1.})), ostrF.str().c_str());
+			painter.drawText(GlToScreenCoords(
+				tl2::create<t_vec_gl>({0., f, 0., 1.})), ostrF.str().c_str());
+			painter.drawText(GlToScreenCoords(
+				tl2::create<t_vec_gl>({0., 0., f, 1.})), ostrF.str().c_str());
+		}
+
+		t_vec_gl x = tl2::create<t_vec_gl>({ m_CoordMax*t_real_gl(1.2), 0., 0., 1. });
+		t_vec_gl y = tl2::create<t_vec_gl>({ 0., m_CoordMax*t_real_gl(1.2), 0., 1. });
+		t_vec_gl z = tl2::create<t_vec_gl>({ 0., 0., m_CoordMax*t_real_gl(1.2), 1. });
+
+		painter.drawText(GlToScreenCoords(x), m_axisLabels[0].length()
+			? m_axisLabels[0].c_str()
+			: (m_is_real_space ? "x" : "Qx"));
+		painter.drawText(GlToScreenCoords(y), m_axisLabels[1].length()
+			? m_axisLabels[1].c_str()
+			: (m_is_real_space ? "y" : "Qy"));
+		painter.drawText(GlToScreenCoords(z), m_axisLabels[2].length()
+			? m_axisLabels[2].c_str()
+			: (m_is_real_space ? "z" : "Qz"));
+	}
+
+
+#ifdef USE_QHULL
+	// TODO: draw labels and ticks for coordinate cube
+	if(m_coordCubeLab.size() && GetObjectVisible(m_coordCubeLab[0]))
+	{
+		using namespace tl2_ops;
+		//const t_mat_gl& camtrafo = m_cam.GetTransformation();
+
+		// assumes that the matrix is the same for all six sides of the cube
+		const t_mat_gl& matScale = GetObjectMatrix(m_coordCubeLab[0]);
+		//tl2::niceprint(std::cout, matScale);
+		//std::cout << std::endl;
+
+		t_vec_gl centre = matScale * tl2::create<t_vec_gl>({ 0., 0., 0., 1. });
+		t_vec_gl corner_mmm = matScale * tl2::create<t_vec_gl>({ -1., -1., -1., 1. });
+		t_vec_gl corner_mmp = matScale * tl2::create<t_vec_gl>({ -1., -1., +1., 1. });
+		t_vec_gl corner_mpm = matScale * tl2::create<t_vec_gl>({ -1., +1., -1., 1. });
+		t_vec_gl corner_mpp = matScale * tl2::create<t_vec_gl>({ -1., +1., +1., 1. });
+		t_vec_gl corner_pmm = matScale * tl2::create<t_vec_gl>({ +1., -1., -1., 1. });
+		t_vec_gl corner_pmp = matScale * tl2::create<t_vec_gl>({ +1., -1., +1., 1. });
+		t_vec_gl corner_ppm = matScale * tl2::create<t_vec_gl>({ +1., +1., -1., 1. });
+		t_vec_gl corner_ppp = matScale * tl2::create<t_vec_gl>({ +1., +1., +1., 1. });
+
+		// calculate projected cube
+		std::vector<t_vec_gl> proj_cube;
+		proj_cube.reserve(8);
+		for(const t_vec_gl& vec : { corner_mmm, corner_mmp, corner_mpm, corner_mpp,
+			corner_pmm, corner_pmp, corner_ppm, corner_ppp })
+		{
+			QPointF pt = GlToScreenCoords(vec);
+			proj_cube.push_back(tl2::create<t_vec_gl>({
+				static_cast<t_real_gl>(pt.x()), static_cast<t_real_gl>(pt.y()) }));
+		}
+
+		// calculate the contour (hull) of the projected cube
+		auto [cube_hull_verts, cube_hull_triags, cuble_hull_neighbours] =
+			geo::calc_delaunay(2, proj_cube, true, false);
+
+		// draw edge labels and ticks
+		auto draw_edge = [this, &painter, &cube_hull_verts](
+		  const t_vec_gl& corner0, const t_vec_gl& corner1,
+		  const t_vec_gl& centre, std::size_t coord_idx)
+		{
+		  t_real_gl min = m_coordCubeRanges[coord_idx*2];
+		  t_real_gl max = m_coordCubeRanges[coord_idx*2 + 1];
+		  t_real_gl tick = m_coordCubeTicks[coord_idx];
+		  QString label = m_axisLabels[coord_idx].c_str();
+
+			bool swapped = false;
+			if(min > max)
+			{
+				std::swap(min, max);
+				swapped = true;
+			}
+
+			// only consider this edge if it's at the border of the projected coordinate cube
+			constexpr const t_real_gl eps_hull = 1e-1;
+			constexpr const t_real_gl label_offs = 0.25;
+			constexpr const t_real_gl tick_offs = 0.05;
+
+			t_vec_gl edge_mid = corner0 + 0.5*(corner1 - corner0);
+			QPointF proj = GlToScreenCoords(edge_mid);
+			QPointF proj_centre = GlToScreenCoords(centre);
+
+			t_vec_gl proj_vert = tl2::create<t_vec_gl>({
+				static_cast<t_real_gl>(proj.x()), static_cast<t_real_gl>(proj.y()) });
+			if(std::get<0>(geo::is_vert_in_hull<t_vec_gl>(cube_hull_verts, proj_vert, nullptr, true, eps_hull)))
+				return;
+
+			// axis label
+			bool is_on_left = false;
+			t_vec_gl offs = label_offs * (edge_mid - centre);
+			proj = GlToScreenCoords(edge_mid + offs);
+
+			// move text rendered on the left side further out
+			if(proj.x() < proj_centre.x())
+			{
+				is_on_left = true;
+				offs *= 1.25;
+				proj = GlToScreenCoords(edge_mid + offs);
+			}
+
+			if(label.length())
+				painter.drawText(proj, label);
+
+			// ticks
+			t_vec_gl centre_axis = centre;
+
+			t_real_gl tick_start = 0.;
+			std::tie(tick, tick_start) = CalcTickMarks(min, max, tick);
+
+			for(t_real_gl t = tick_start; t < max; t += tick)
+			{
+				t_real_gl t_img = TickTrafo(min, max, t);
+				t_vec_gl edge_pt = corner0 + t_img*(corner1 - corner0);
+
+				centre_axis[coord_idx] = edge_pt[coord_idx];
+				offs = tick_offs * (edge_pt - centre_axis);
+
+				// move text rendered on the left side further out
+				if(is_on_left)
+					offs *= 2.5;
+
+				proj = GlToScreenCoords(edge_pt + offs);
+
+				t_real_gl t_disp = t;
+				if(swapped)  // invert the range
+					t_disp = max - (t - tick_start);
+				tl2::set_eps_0(t_disp);
+				painter.drawText(proj, QString{"%1"}.arg(t_disp));
+			}
+		};
+
+		draw_edge(corner_mmm, corner_mmp, centre, 2);
+		draw_edge(corner_mpm, corner_mpp, centre, 2);
+		draw_edge(corner_pmm, corner_pmp, centre, 2);
+		draw_edge(corner_ppm, corner_ppp, centre, 2);
+
+		draw_edge(corner_mmm, corner_mpm, centre, 1);
+		draw_edge(corner_mmp, corner_mpp, centre, 1);
+		draw_edge(corner_pmm, corner_ppm, centre, 1);
+		draw_edge(corner_pmp, corner_ppp, centre, 1);
+
+		draw_edge(corner_mmm, corner_pmm, centre, 0);
+		draw_edge(corner_mmp, corner_pmp, centre, 0);
+		draw_edge(corner_mpm, corner_ppm, centre, 0);
+		draw_edge(corner_mpp, corner_ppp, centre, 0);
+	}
+#endif
+
+
+	// draw coordinate system in generally non-orthogonal crystal system in rlu
+	objCoordCross = GetCoordCross(true);
+	if(objCoordCross && GetObjectVisible(*objCoordCross))
+	{
+		// coordinate labels
+		painter.drawText(GlToScreenCoords(tl2::create<t_vec_gl>({0., 0., 0., 1.})), "0");
+		for(t_real_gl f = -std::floor(m_CoordMax); f <= std::floor(m_CoordMax); f += 0.5)
+		{
+			if(tl2::equals<t_real_gl>(f, 0))
+				continue;
+
+			std::ostringstream ostrF;
+			ostrF << f;
+			painter.drawText(GlToScreenCoords(
+				tl2::create<t_vec_gl>({f, 0., 0., 1.})), ostrF.str().c_str());
+			painter.drawText(GlToScreenCoords(
+				tl2::create<t_vec_gl>({0., f, 0., 1.})), ostrF.str().c_str());
+			painter.drawText(GlToScreenCoords(
+				tl2::create<t_vec_gl>({0., 0., f, 1.})), ostrF.str().c_str());
+		}
+
+		t_vec_gl h = tl2::create<t_vec_gl>({m_CoordMax*t_real_gl(1.2), 0., 0., 1.});
+		t_vec_gl k = tl2::create<t_vec_gl>({0., m_CoordMax*t_real_gl(1.2), 0., 1.});
+		t_vec_gl l = tl2::create<t_vec_gl>({0., 0., m_CoordMax*t_real_gl(1.2), 1.});
+
+		if(m_is_real_space)
+		{
+			h = m_matA * h;
+			k = m_matA * k;
+			l = m_matA * l;
+		}
+		else
+		{
+			h = m_matB * h;
+			k = m_matB * k;
+			l = m_matB * l;
+		}
+
+		painter.drawText(GlToScreenCoords(h), m_is_real_space ? "x_xtl" : "h");
+		painter.drawText(GlToScreenCoords(k), m_is_real_space ? "y_xtl" : "k");
+		painter.drawText(GlToScreenCoords(l), m_is_real_space ? "z_xtl" : "l");
+	}
+
+
+	// render object labels
+	if(m_showLabels)
+	{
+		for(const auto& obj : m_objs)
+		{
+			if(!obj.m_visible || !obj.m_valid)
+				continue;
+			if(obj.m_label == "")
+				continue;
+
+			const t_mat_gl *coordTrafo = &matUnit;
+			if(m_coordsys == 1 && !obj.m_invariant)
+				coordTrafo = &m_matA;
+
+			t_vec3_gl posLabel3d = tl2::prod_mv(tl2::prod((*coordTrafo), obj.m_mat), obj.m_label_pos);
+			auto posLabel2d = GlToScreenCoords(tl2::create<t_vec_gl>(
+				{ posLabel3d[0], posLabel3d[1], posLabel3d[2], 1. }), &obj);
+
+			QFont fontLabel = m_font;
+			QPen penLabel = penOrig;
+
+			fontLabel.setWeight(QFont::Medium);
+			penLabel.setColor(QColor(0,0,0,255));
+			painter.setFont(fontLabel);
+			painter.setPen(penLabel);
+			painter.drawText(posLabel2d, obj.m_label.c_str());
+
+			fontLabel.setWeight(QFont::Normal);
+			penLabel.setColor(QColor(
+				int(obj.m_colour[0]*255.), int(obj.m_colour[1]*255.),
+				int(obj.m_colour[2]*255.), int(obj.m_colour[3]*255.)));
+			painter.setFont(fontLabel);
+			painter.setPen(penLabel);
+			painter.drawText(posLabel2d, obj.m_label.c_str());
+		}
+	}
+
+
+	// restore original styles
+	painter.setFont(fontOrig);
+	painter.setPen(penOrig);
+}
+
+
+void GlPlotRenderer::paintGL()
+{
+	if(!m_initialised || !m_pPlot)
+		return;
+
+	QMutexLocker _locker{&m_mutexObj};
+
+	if constexpr(!m_isthreaded)
+	{
+		if(auto *pContext = m_pPlot->context(); !pContext || !pContext->isValid())
+			return;
+		QPainter painter(m_pPlot);
+		painter.setRenderHint(QPainter::Antialiasing);
+
+		// gl painting
+		{
+			BOOST_SCOPE_EXIT(&painter) { painter.endNativePainting(); } BOOST_SCOPE_EXIT_END
+
+			if(m_picker_needs_update)
+				UpdatePicker();
+
+			auto *pGl = GetGlFunctions();
+			painter.beginNativePainting();
+			DoPaintGL(pGl);
+		}
+
+		// qt painting
+		DoPaintNonGL(painter);
+	}
+	else	// threaded
+	{
+		QThread *pThisThread = QThread::currentThread();
+		if(!pThisThread->isRunning() || pThisThread->isInterruptionRequested())
+			return;
+
+		if(auto *pContext = m_pPlot->context(); !pContext || !pContext->isValid())
+			return;
+
+		QMetaObject::invokeMethod(m_pPlot,
+			&GlPlot::MoveContextToThread, Qt::ConnectionType::BlockingQueuedConnection);
+
+		if(!m_pPlot->IsContextInThread())
+		{
+			std::cerr << "GL error in " << __func__ << ": Context is not in thread!" << std::endl;
+			return;
+		}
+
+		m_pPlot->GetMutex()->lock();
+		m_pPlot->makeCurrent();
+		BOOST_SCOPE_EXIT(m_pPlot)
+		{
+			m_pPlot->doneCurrent();
+			m_pPlot->context()->moveToThread(qGuiApp->thread());
+			m_pPlot->GetMutex()->unlock();
+
+			if constexpr(!m_usetimer)
+			{
+				// if the frame is not already updated by the timer,
+				// directly update it
+				m_pPlot->GetRenderer()->RequestPlotUpdate();
+			}
+		}
+		BOOST_SCOPE_EXIT_END
+
+		if(!m_initialised)
+			initialiseGL();
+		if(!m_initialised)
+		{
+			std::cerr << "GL error: Initialisation failed." << std::endl;
+			return;
+		}
+
+		if(m_viewport_needs_update)
+			UpdateViewport();
+		if(m_picker_needs_update)
+			UpdatePicker();
+
+		DoPaintGL(GetGlFunctions());
+	}
+}
+// ----------------------------------------------------------------------------
+
+
+
+// ----------------------------------------------------------------------------
+// GLPlot wrapper class
+// ----------------------------------------------------------------------------
+
+GlPlot::GlPlot(QWidget *pParent) : QOpenGLWidget(pParent),
+	m_renderer(std::make_unique<GlPlotRenderer>(this)),
+	m_thread_impl(std::make_unique<QThread>(this))
+{
+#if defined(_GL_MAJ_VER) && defined(_GL_MIN_VER)
+	tl2::set_gl_format(true, _GL_MAJ_VER, _GL_MIN_VER);
+#endif
+	qRegisterMetaType<std::size_t>("std::size_t");
+	setAttribute(Qt::WA_DeleteOnClose);
+
+	if constexpr(m_isthreaded)
+	{
+		m_renderer->moveToThread(m_thread_impl.get());
+
+		connect(m_thread_impl.get(), &QThread::started,
+			m_renderer.get(), &GlPlotRenderer::startedThread);
+		connect(m_thread_impl.get(), &QThread::finished,
+			m_renderer.get(), &GlPlotRenderer::stoppedThread);
+	}
+
+	connect(this, &QOpenGLWidget::aboutToCompose, this, &GlPlot::beforeComposing);
+	connect(this, &QOpenGLWidget::frameSwapped, this, &GlPlot::afterComposing);
+	connect(this, &QOpenGLWidget::aboutToResize, this, &GlPlot::beforeResizing);
+	connect(this, &QOpenGLWidget::resized, this, &GlPlot::afterResizing);
+
+	//setUpdateBehavior(QOpenGLWidget::PartialUpdate);
+	setMouseTracking(true);
+	grabGesture(Qt::PinchGesture);
+
+	if constexpr(m_isthreaded)
+		m_thread_impl->start();
+}
+
+
+GlPlot::~GlPlot()
+{
+	ungrabGesture(Qt::PinchGesture);
+	setMouseTracking(false);
+
+	if constexpr(m_isthreaded)
+	{
+		m_thread_impl->requestInterruption();
+		m_thread_impl->exit();
+		m_thread_impl->wait();
+	}
+}
+
+
+void GlPlot::initializeGL()
+{
+	if constexpr(!m_isthreaded)
+	{
+		m_renderer->initialiseGL();
+		if(m_renderer->IsInitialised())
+			emit AfterGLInitialisation();
+		else
+			emit GLInitialisationFailed();
+	}
+}
+
+
+void GlPlot::resizeGL(int w, int h)
+{
+	if constexpr(!m_isthreaded)
+	{
+		m_renderer->SetScreenDims(w, h);
+		m_renderer->UpdateViewport();
+	}
+}
+
+
+void GlPlot::paintGL()
+{
+	if constexpr(!m_isthreaded)
+	{
+		m_renderer->paintGL();
+	}
+}
+
+
+void GlPlot::mouseMoveEvent(QMouseEvent *pEvt)
+{
+	QPointF pos = pEvt->position();
+
+	m_renderer->mouseMoveEvent(pos);
+	m_mouseMovedBetweenDownAndUp = true;
+	pEvt->accept();
+}
+
+
+void GlPlot::mousePressEvent(QMouseEvent *pEvt)
+{
+	m_mouseMovedBetweenDownAndUp = false;
+
+	if(pEvt->buttons() & Qt::LeftButton)
+		m_mouseDown[0] = true;
+	if(pEvt->buttons() & Qt::MiddleButton)
+		m_mouseDown[1] = true;
+	if(pEvt->buttons() & Qt::RightButton)
+		m_mouseDown[2] = true;
+
+	if(m_mouseDown[1])
+		m_renderer->ResetZoom();
+	if(m_mouseDown[2])
+		m_renderer->BeginRotation();
+
+	pEvt->accept();
+	emit MouseDown(m_mouseDown[0], m_mouseDown[1], m_mouseDown[2]);
+}
+
+
+void GlPlot::mouseReleaseEvent(QMouseEvent *pEvt)
+{
+	bool mouseDownOld[] = { m_mouseDown[0], m_mouseDown[1], m_mouseDown[2] };
+
+	if((pEvt->buttons() & Qt::LeftButton) == 0)
+		m_mouseDown[0] = false;
+	if((pEvt->buttons() & Qt::MiddleButton) == 0)
+		m_mouseDown[1] = false;
+	if((pEvt->buttons() & Qt::RightButton) == 0)
+		m_mouseDown[2] = false;
+
+	if(!m_mouseDown[2])
+		m_renderer->EndRotation();
+
+	pEvt->accept();
+	emit MouseUp(!m_mouseDown[0], !m_mouseDown[1], !m_mouseDown[2]);
+
+	// only emit click if moving the mouse (i.e. rotationg the scene) was not the primary intent
+	if(!m_mouseMovedBetweenDownAndUp)
+	{
+		bool mouseClicked[] = { !m_mouseDown[0] && mouseDownOld[0],
+			!m_mouseDown[1] && mouseDownOld[1],
+			!m_mouseDown[2] && mouseDownOld[2] };
+		if(mouseClicked[0] || mouseClicked[1] || mouseClicked[2])
+			emit MouseClick(mouseClicked[0], mouseClicked[1], mouseClicked[2]);
+	}
+}
+
+
+void GlPlot::wheelEvent(QWheelEvent *pEvt)
+{
+	const t_real_gl degrees = pEvt->angleDelta().y() / 8.;
+	m_renderer->zoom(degrees);
+
+	if(!m_renderer->GetCamera().GetPerspectiveProjection())
+		m_renderer->RequestViewportUpdate();
+
+	pEvt->accept();
+}
+
+
+bool GlPlot::event(QEvent *pEvt)
+{
+	if(pEvt->type() == QEvent::Gesture)
+	{
+		QGestureEvent *pGestureEvt = static_cast<QGestureEvent*>(pEvt);
+		for(QGesture *gesture : pGestureEvt->gestures())
+		{
+			if(gesture->gestureType() != Qt::PinchGesture)
+				continue;
+			QPinchGesture *pinch = static_cast<QPinchGesture*>(gesture);
+
+			t_real_gl zoom = pinch->scaleFactor();
+			zoom = std::log2(zoom) * 64.;
+			m_renderer->zoom(zoom);
+		}
+		pGestureEvt->accept();
+	}
+
+	return QOpenGLWidget::event(pEvt);
+}
+
+
+void GlPlot::paintEvent(QPaintEvent* pEvt)
+{
+	if constexpr(!m_isthreaded)
+		QOpenGLWidget::paintEvent(pEvt);
+}
+
+
+/**
+ * move the GL context to the associated thread
+ */
+void GlPlot::MoveContextToThread()
+{
+	if constexpr(m_isthreaded)
+	{
+		if(auto *pContext = context(); pContext && m_thread_impl.get())
+			pContext->moveToThread(m_thread_impl.get());
+	}
+}
+
+
+/**
+ * does the GL context run in the current thread?
+ */
+bool GlPlot::IsContextInThread() const
+{
+	if constexpr(m_isthreaded)
+	{
+		auto *pContext = context();
+		if(!pContext)
+			return false;
+
+		return pContext->thread() == m_thread_impl.get();
+	}
+	else
+	{
+		return true;
+	}
+}
+
+
+/**
+ * main thread wants to compose -> wait for sub-threads to be finished
+ */
+void GlPlot::beforeComposing()
+{
+	if constexpr(m_isthreaded)
+		m_mutex.lock();
+}
+
+
+/**
+ * main thread has composed -> sub-threads can be unblocked
+ */
+void GlPlot::afterComposing()
+{
+	if constexpr(m_isthreaded)
+	{
+		m_mutex.unlock();
+		QMetaObject::invokeMethod(m_renderer.get(),
+			&GlPlotRenderer::paintGL, Qt::ConnectionType::QueuedConnection);
+	}
+}
+
+
+/**
+ * main thread wants to resize -> wait for sub-threads to be finished
+ */
+void GlPlot::beforeResizing()
+{
+	if constexpr(m_isthreaded)
+		m_mutex.lock();
+}
+
+
+/**
+ * main thread has resized -> sub-threads can be unblocked
+ */
+void GlPlot::afterResizing()
+{
+	if constexpr(m_isthreaded)
+	{
+		m_mutex.unlock();
+
+		const int w = width(), h = height();
+		m_renderer->SetScreenDims(w, h);
+	}
+}
+
+// ----------------------------------------------------------------------------
+}
