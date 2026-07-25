@@ -17,24 +17,11 @@
 *.obj
 *.moc
 *.class
-!tools_py/magdyn/tests/_magdyn_py.so
-!tools_py/magdyn/tests/_magpy.so
 
 # build dirs
-tools/structfact/build/**
-tools/bz/build/**
-tools/cif2xml/build/**
-tools/magstructfact/build/**
-tools/magsgbrowser/build/**
-tools/pol/build/**
-tools/moldyn/build/**
-tools/magdyn/build/**
-tools/scanbrowser/build/**
-tools/setup/build/**
-tools_py/magdyn/build/**
-tools_py/bz/build/**
-tools_py/instr/build/**
+tools_py/build/**
 tools_c/build/**
+unittests/build/**
 build/**
 
 # temporary files
