@@ -388,54 +388,6 @@ requires is_mat<t_mat> && is_vec<t_vec>
 }
 // ----------------------------------------------------------------------------
 
-
-
-
-// ----------------------------------------------------------------------------
-// non-cartesion projection operators
-// ----------------------------------------------------------------------------
-
-/**
- * matrix to project onto vector: P = |v><v|
- * from: |x'> = <v|x> * |v> = |v><v|x> = |v><v| * |x>
- * @see (Arens 2015), p. 814 for the projection tensor
- */
-template<class t_mat, class t_vec>
-t_mat projector(const t_mat& metric_co, const t_vec& vec_contra, bool is_normalised = true)
-requires is_vec<t_vec> && is_mat<t_mat>
-{
-	if(is_normalised)
-	{
-		return tl2::outer<t_mat, t_vec>(metric_co, vec_contra, vec_contra);
-	}
-	else
-	{
-		const auto len = tl2::norm<t_mat, t_vec>(metric_co, vec_contra, false);
-		return tl2::outer<t_mat, t_vec>(metric_co, vec_contra, vec_contra) / len;
-	}
-}
-
-
-
-/**
- * matrix to project onto orthogonal complement (plane perpendicular to vector): P = 1-|v><v|
- * from completeness relation: 1 = sum_i |v_i><v_i| = |x><x| + |y><y| + |z><z|
- *
- * @see (Arens 2015), p. 814 for the projection tensor
- */
-template<class t_mat, class t_vec>
-t_mat ortho_projector(const t_mat& metric_or_B_co, const t_vec& vec_contra,
-	bool is_normalised = true, bool is_metric = true)
-requires is_vec<t_vec> && is_mat<t_mat>
-{
-	const std::size_t size = vec_contra.size();
-	return unit<t_mat>(size) -
-		tl2::projector<t_mat, t_vec>(
-		  is_metric ? metric_or_B_co : metric<t_mat>(metric_or_B_co),
-			vec_contra, is_normalised);
-}
-// ----------------------------------------------------------------------------
-
 }
 
 #endif
