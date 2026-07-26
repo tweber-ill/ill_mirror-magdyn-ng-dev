@@ -150,7 +150,6 @@ protected:
 		return get_gl_functions(reinterpret_cast<QOpenGLWidget*>(m_pPlot));
 	}
 
-	void UpdateCam();
 	void UpdatePicker();
 	void UpdateLights();
 	void UpdateBTrafo();
@@ -369,6 +368,7 @@ public:
 
 	void RequestViewportUpdate();
 	void UpdateViewport();
+	void UpdateCam();
 
 	// create the coordinate tick textures
 	void UpdateCoordCubeTextures(
@@ -447,6 +447,7 @@ protected:
 	virtual void mousePressEvent(QMouseEvent *Evt) override;
 	virtual void mouseReleaseEvent(QMouseEvent *Evt) override;
 	virtual void wheelEvent(QWheelEvent *pEvt) override;
+	virtual void keyPressEvent(QKeyEvent *pEvt) override;
 	virtual bool event(QEvent* pEvt) override;
 
 

@@ -2288,6 +2288,7 @@ GlPlot::GlPlot(QWidget *pParent) : QOpenGLWidget(pParent),
 	connect(this, &QOpenGLWidget::resized, this, &GlPlot::afterResizing);
 
 	//setUpdateBehavior(QOpenGLWidget::PartialUpdate);
+	setFocusPolicy(Qt::StrongFocus);
 	setMouseTracking(true);
 	grabGesture(Qt::PinchGesture);
 
@@ -2411,6 +2412,43 @@ void GlPlot::wheelEvent(QWheelEvent *pEvt)
 		m_renderer->RequestViewportUpdate();
 
 	pEvt->accept();
+}
+
+
+void GlPlot::keyPressEvent(QKeyEvent *pEvt)
+{
+	bool handled = false;
+	const t_real_gl dx = 0.1;
+
+	switch(pEvt->key())
+	{
+		case Qt::Key_Up:
+			m_renderer->GetCamera().Translate(0., -dx, 0.);
+			handled = true;
+			break;
+		case Qt::Key_Down:
+			m_renderer->GetCamera().Translate(0., dx, 0.);
+			handled = true;
+			break;
+		case Qt::Key_Left:
+			m_renderer->GetCamera().Translate(dx, 0., 0.);
+			handled = true;
+			break;
+		case Qt::Key_Right:
+			m_renderer->GetCamera().Translate(-dx, 0., 0.);
+			handled = true;
+			break;
+	}
+
+	if(handled)
+	{
+		m_renderer->UpdateCam();
+		pEvt->accept();
+	}
+	else
+	{
+		pEvt->ignore();
+	}
 }
 
 
