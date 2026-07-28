@@ -54,7 +54,7 @@ int main(int argc, char** argv)
 	tl2::set_locales();
 
 	// main window
-	auto sett = std::make_shared<QSettings>("tlibs", "plot3d");
+	auto sett = std::make_shared<QSettings>("tw", "plot3d");
 	auto plt = std::make_unique<Plot3DDlg>(nullptr, sett.get());
 	plt->show();
 

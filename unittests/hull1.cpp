@@ -7,11 +7,9 @@
  * g++ -std=c++20 -I.. -I/usr/include/libqhullcpp -DUSE_QHULL -o hull1 hull1.cpp -lqhull_r -lqhullcpp
  *
  * ----------------------------------------------------------------------------
- * tlibs
- * Copyright (C) 2017-2021  Tobias WEBER (Institut Laue-Langevin (ILL),
+ * magpie & mag-core
+ * Copyright (C) 2018-2026  Tobias WEBER (Institut Laue-Langevin (ILL),
  *                          Grenoble, France).
- * Copyright (C) 2015-2017  Tobias WEBER (Technische Universitaet Muenchen
- *                          (TUM), Garching, Germany).
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by

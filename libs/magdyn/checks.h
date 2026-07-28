@@ -1,5 +1,5 @@
 /**
- * tlibs2 -- magnetic dynamics -- sanity checks
+ * magnetic dynamics -- sanity checks
  * @author Tobias Weber <tweber@ill.fr>
  * @date 2022 - 2026
  * @license GPLv3, see 'LICENSE' file

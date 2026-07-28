@@ -13,11 +13,9 @@
  * g++ -std=c++20 -I .. -o rotation rotation.cpp
  *
  * ----------------------------------------------------------------------------
- * tlibs
- * Copyright (C) 2017-2022  Tobias WEBER (Institut Laue-Langevin (ILL),
+ * magpie & mag-core
+ * Copyright (C) 2018-2026  Tobias WEBER (Institut Laue-Langevin (ILL),
  *                          Grenoble, France).
- * Copyright (C) 2015-2017  Tobias WEBER (Technische Universitaet Muenchen
- *                          (TUM), Garching, Germany).
  * "mathlibs" project
  * Copyright (C) 2017-2022  Tobias WEBER (privately developed).
  *

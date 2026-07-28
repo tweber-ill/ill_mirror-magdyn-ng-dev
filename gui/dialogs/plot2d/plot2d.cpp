@@ -903,7 +903,7 @@ void Plot2DDlg::SaveData()
 		user = "";
 
 	ofstr << "#\n"
-		<< "# Created by tlibs\n"
+		<< "# Created by Magpie\n"
 		<< "# URL: https://github.com/ILLGrenoble/magpie\n"
 		<< "# DOI: https://doi.org/10.5281/zenodo.16180814\n"
 		<< "# User: " << user << "\n"

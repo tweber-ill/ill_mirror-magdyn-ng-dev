@@ -1,15 +1,13 @@
 #
-# tlibs2 -- tests
+# unit tests
 # @author Tobias Weber <tweber@ill.fr>
 # @date 8-jun-2020
 # @license GPLv3, see 'LICENSE' file
 #
 # ----------------------------------------------------------------------------
-# tlibs
-# Copyright (C) 2017-2021  Tobias WEBER (Institut Laue-Langevin (ILL),
+# Magpie
+# Copyright (C) 2022-2026  Tobias WEBER (Institut Laue-Langevin (ILL),
 #                          Grenoble, France).
-# Copyright (C) 2015-2017  Tobias WEBER (Technische Universitaet Muenchen
-#                          (TUM), Garching, Germany).
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
