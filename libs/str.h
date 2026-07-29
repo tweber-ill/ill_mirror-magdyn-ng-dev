@@ -47,11 +47,13 @@
 #include <type_traits>
 #include <cctype>
 #include <cwctype>
+#include <random>
 #include <filesystem>
 
 #include <boost/tokenizer.hpp>
 #include <boost/algorithm/string.hpp>
 
+#include "algos.h"
 #include "expr.h"
 
 
@@ -562,6 +564,21 @@ bool get_colour(const std::string& _col, t_val *rgb)
 	return true;
 }
 
+
+template<class t_str = std::string>
+t_str get_random_colour()
+{
+	static std::mt19937 rndgen{tl2::epoch<unsigned int>()};
+
+	std::ostringstream ostrcol;
+	std::uniform_int_distribution<int> dist{0, 255};
+
+	ostrcol << "#" << std::hex << std::setw(2) << std::setfill('0') << dist(rndgen)
+	<< std::setw(2) << std::setfill('0') << dist(rndgen)
+	<< std::setw(2) << std::setfill('0') << dist(rndgen);
+
+	return ostrcol.str();
+}
 
 // ----------------------------------------------------------------------------
 

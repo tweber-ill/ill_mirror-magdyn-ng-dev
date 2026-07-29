@@ -442,17 +442,6 @@ t_energy<Sys, T> k2E(const t_wavenumber<Sys, T>& k)
 }
 
 
-template<class Sys, class T = double>
-t_wavenumber<Sys, T> E2k(const t_energy<Sys, T>& _E, bool &bImag)
-{
-	bImag = (_E < T(0.)*meV<T>);
-	t_energy<Sys, T> E = bImag ? -_E : _E;
-	const T dE = E / meV<T>;
-	const T dk = std::sqrt(E2KSQ<T> * dE);
-	return dk / angstrom<T>;
-}
-
-
 /**
  * get energy transfer from ki and kf
  * (version with units)

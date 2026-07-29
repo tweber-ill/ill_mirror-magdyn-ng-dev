@@ -208,30 +208,9 @@ template<class T> using underlying_value_type = typename _underlying_value_type<
 
 
 
-template<typename t_arg, std::size_t ...idx>
-using _t_fkt_vararg_impl = t_arg(*)(
-	typename std::remove_reference<
-		decltype(std::declval<t_arg*>()[idx])
-	>::type...);
-
-template<typename t_arg, std::size_t ...idx>
-static _t_fkt_vararg_impl<t_arg, idx...>
-_tstfkt_vararg(const std::integer_sequence<std::size_t, idx...>&)
-{ return nullptr; /* not interested in return value, only its type */ }
-
-
-/**
- * constructs a function type with 'iNumArgs' arguments: t_arg (*) (t_arg, t_arg, ...)
- */
-template<typename t_arg, std::size_t iNumArgs>
-using t_fkt_vararg = decltype(
-	_tstfkt_vararg<t_arg>(
-		std::make_integer_sequence<std::size_t, iNumArgs>()));
-// -----------------------------------------------------------------------------
-
-
 // boolean value
 template<bool value, class = void> constexpr bool bool_value = value;
+
 
 }
 #endif

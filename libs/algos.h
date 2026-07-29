@@ -39,7 +39,6 @@
 #include <chrono>
 #include <vector>
 #include <sstream>
-#include <random>
 #include <filesystem>
 
 #include <boost/date_time/c_time.hpp>
@@ -65,20 +64,10 @@ bool file_exists(const std::basic_string<t_char>& strDir)
 
 
 /**
- * like std::chrono::seconds/minutes/hours, but with variable type
+ * like std::chrono::seconds, but with variable type
  */
 template<typename T = long >
 using t_dur_secs = std::chrono::duration<T, std::ratio<1, 1>>;
-template<typename T = long >
-using t_dur_mins = std::chrono::duration<T, std::ratio<60, 1>>;
-template<typename T = long >
-using t_dur_hours = std::chrono::duration<T, std::ratio<60*60, 1>>;
-
-template<typename T = long >
-using t_dur_days = std::chrono::duration<T, std::ratio<60*60*24, 1>>;
-
-template<typename T = long >
-using t_dur_weeks = std::chrono::duration<T, std::ratio<60*60*24*7, 1>>;
 
 
 
@@ -197,23 +186,6 @@ t_vec reorder(const t_func& get_elem_ptr, std::size_t N, const t_perm& perm)
 	}
 
 	return vec_new;
-}
-
-
-
-template<class t_str = std::string>
-t_str get_random_colour()
-{
-	static std::mt19937 rndgen{tl2::epoch<unsigned int>()};
-
-	std::ostringstream ostrcol;
-	std::uniform_int_distribution<int> dist{0, 255};
-
-	ostrcol << "#" << std::hex << std::setw(2) << std::setfill('0') << dist(rndgen)
-		<< std::setw(2) << std::setfill('0') << dist(rndgen)
-		<< std::setw(2) << std::setfill('0') << dist(rndgen);
-
-	return ostrcol.str();
 }
 
 

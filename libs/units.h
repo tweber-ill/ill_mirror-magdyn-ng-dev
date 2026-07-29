@@ -60,40 +60,80 @@ template<typename T = double> constexpr T __pi = boost::math::constants::pi<T>()
 
 
 // general quantities
-template<class Sys, class T = double> using t_length = units::quantity<units::unit<units::length_dimension, Sys>, T>;
-template<class Sys, class T = double> using t_momentum = units::quantity<units::unit<units::momentum_dimension, Sys>, T>;
-template<class Sys, class T = double> using t_wavenumber = units::quantity<units::unit<units::wavenumber_dimension, Sys>, T>;
-template<class Sys, class T = double> using t_velocity = units::quantity<units::unit<units::velocity_dimension, Sys>, T>;
-template<class Sys, class T = double> using t_frequency = units::quantity<units::unit<units::frequency_dimension, Sys>, T>;
-template<class Sys, class T = double> using t_energy = units::quantity<units::unit<units::energy_dimension, Sys>, T>;
-template<class Sys, class T = double> using t_angle = units::quantity<units::unit<units::plane_angle_dimension, Sys>, T>;
-template<class Sys, class T = double> using t_temperature = units::quantity<units::unit<units::temperature_dimension, Sys>, T>;
-template<class Sys, class T = double> using t_mass = units::quantity<units::unit<units::mass_dimension, Sys>, T>;
-template<class Sys, class T = double> using t_time = units::quantity<units::unit<units::time_dimension, Sys>, T>;
-template<class Sys, class T = double> using t_flux = units::quantity<units::unit<units::magnetic_flux_density_dimension, Sys>, T>;
-template<class Sys, class T = double> using t_area = units::quantity<units::unit<units::area_dimension, Sys>, T>;
-template<class Sys, class T = double> using t_volume = units::quantity<units::unit<units::volume_dimension, Sys>, T>;
+template<class Sys, class T = double>
+using t_length = units::quantity<units::unit<units::length_dimension, Sys>, T>;
 
-template<class Sys, class T = double> using t_length_inverse =
+template<class Sys, class T = double>
+using t_momentum = units::quantity<units::unit<units::momentum_dimension, Sys>, T>;
+
+template<class Sys, class T = double>
+using t_wavenumber = units::quantity<units::unit<units::wavenumber_dimension, Sys>, T>;
+
+template<class Sys, class T = double>
+using t_velocity = units::quantity<units::unit<units::velocity_dimension, Sys>, T>;
+
+template<class Sys, class T = double>
+using t_frequency = units::quantity<units::unit<units::frequency_dimension, Sys>, T>;
+
+template<class Sys, class T = double>
+using t_energy = units::quantity<units::unit<units::energy_dimension, Sys>, T>;
+
+template<class Sys, class T = double>
+using t_angle = units::quantity<units::unit<units::plane_angle_dimension, Sys>, T>;
+
+template<class Sys, class T = double>
+using t_temperature = units::quantity<units::unit<units::temperature_dimension, Sys>, T>;
+
+template<class Sys, class T = double>
+using t_mass = units::quantity<units::unit<units::mass_dimension, Sys>, T>;
+
+template<class Sys, class T = double>
+using t_time = units::quantity<units::unit<units::time_dimension, Sys>, T>;
+
+template<class Sys, class T = double>
+using t_flux = units::quantity<units::unit<units::magnetic_flux_density_dimension, Sys>, T>;
+
+template<class Sys, class T = double>
+using t_area = units::quantity<units::unit<units::area_dimension, Sys>, T>;
+
+template<class Sys, class T = double>
+using t_volume = units::quantity<units::unit<units::volume_dimension, Sys>, T>;
+
+template<class Sys, class T = double>
+using t_length_inverse =
 	units::quantity<units::unit<units::derived_dimension<units::length_base_dimension, -1>::type, Sys>, T>;
-template<class Sys, class T = double> using t_length_square =
+
+template<class Sys, class T = double>
+using t_length_square =
 	units::quantity<units::unit<units::derived_dimension<units::length_base_dimension, 2>::type, Sys>, T>;
-template<class Sys, class T = double> using t_momentum_square =
+
+template<class Sys, class T = double>
+using t_momentum_square =
 	units::quantity<units::unit<units::derived_dimension<units::momentum_dimension, 2>::type, Sys>, T>;
-template<class Sys, class T = double> using t_action =
+
+template<class Sys, class T = double>
+using t_action =
 	units::quantity<units::unit<typename units::derived_dimension
 	<units::mass_base_dimension,1, units::length_base_dimension,2, units::time_base_dimension,-1>::type, Sys>, T>;
-template<class Sys, class T = double> using t_energy_per_temperature =
+
+template<class Sys, class T = double>
+using t_energy_per_temperature =
 	units::quantity<units::unit<typename units::derived_dimension
 	<units::mass_base_dimension,1, units::length_base_dimension,2,
 	units::time_base_dimension,-2, units::temperature_base_dimension,-1>::type, Sys>, T>;
-template<class Sys, class T = double> using t_energy_per_field =
+
+template<class Sys, class T = double>
+using t_energy_per_field =
 	units::quantity<units::unit<typename units::derived_dimension
 	<units::current_base_dimension,1, units::length_base_dimension,2>::type, Sys>, T>;
-template<class Sys, class T = double> using t_inv_flux_time =
+
+template<class Sys, class T = double>
+using t_inv_flux_time =
 	units::quantity<units::unit<typename units::derived_dimension
 	<units::current_base_dimension,1, units::time_base_dimension,1, units::mass_base_dimension,-1>::type, Sys>, T>;
-template<class Sys, class T = double> using t_dimensionless =
+
+template<class Sys, class T = double>
+using t_dimensionless =
 	units::quantity<units::unit<units::dimensionless_type, Sys>, T>;
 
 
@@ -174,13 +214,6 @@ t_quant my_units_sqrt(const decltype(t_quant() * t_quant())& val)
 
 	T valsq = T(val / one_quant_sq);
 	return std::sqrt(valsq) * one_quant;
-}
-
-
-template<class t_quant>
-decltype(t_quant()*t_quant()) my_units_pow2(const t_quant& val)
-{
-	return val*val;
 }
 
 
