@@ -1,7 +1,7 @@
 # see: https://github.com/citation-file-format/citation-file-format/blob/main/schema-guide.md
 
 cff-version: 1.2.0
-title: Magpie
+title: Magdyn-NG
 authors:
   - family-names: WEBER
     given-names: Tobias
