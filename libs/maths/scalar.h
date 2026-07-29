@@ -46,11 +46,24 @@
 #include <cmath>
 
 #include "decls.h"
-#include "constants.h"
 
 
 
 namespace tl2 {
+// ----------------------------------------------------------------------------
+// constants
+// ----------------------------------------------------------------------------
+template<typename T = double> constexpr T pi{std::numbers::pi_v<T>};
+template<typename T = double> constexpr T golden{std::numbers::phi_v<T>};
+
+template<typename INT = int> bool is_even(INT i) { return (i%2 == 0); }
+template<typename INT = int> bool is_odd(INT i) { return !is_even<INT>(i); }
+
+template<class T = double> constexpr T r2d(T rad) { return rad/pi<T>*T(180); }     // rad -> deg
+template<class T = double> constexpr T d2r(T deg) { return deg/T(180)*pi<T>; }     // deg -> rad
+// ----------------------------------------------------------------------------
+
+
 // ----------------------------------------------------------------------------
 // scalar algorithms
 // ----------------------------------------------------------------------------
@@ -106,22 +119,6 @@ requires is_scalar<t_real>
 
 
 /**
- * are two angles equal within an epsilon range?
- */
-template<class T>
-bool angle_equals(T t1, T t2,
-	T eps = std::numeric_limits<T>::epsilon(),
-	T tomod = T{2}*pi<T>)
-requires is_scalar<T>
-{
-	t1 = mod_pos<T>(t1, tomod);
-	t2 = mod_pos<T>(t2, tomod);
-
-	return std::abs(t1 - t2) <= eps;
-}
-
-
-/**
  * are two complex numbers equal within an epsilon range?
  */
 template<class T> requires is_complex<T>
@@ -148,18 +145,6 @@ template<typename T> T sign(T t)
 	if(t < 0.)
 		return -T(1);
 	return T(1);
-}
-
-
-template<typename T> T cot(T t)
-{
-	return std::tan(T(0.5)*pi<T> - t);
-}
-
-
-template<typename T> T coth(T t)
-{
-	return T(1) / std::tanh(t);
 }
 
 
@@ -310,6 +295,7 @@ T gauss_model(T x, T x0, T sigma, T amp, T offs)
 	T norm = T(1)/(std::sqrt(T(2)*pi<T>) * sigma);
 	return amp * norm * std::exp(-0.5 * ((x-x0)/sigma)*((x-x0)/sigma)) + offs;
 }
+// ----------------------------------------------------------------------------
 
 
 // ----------------------------------------------------------------------------
@@ -323,16 +309,17 @@ template<class t_elem, template<class...> class t_cont /*= std::vector*/>
 t_elem mean(const t_cont<t_elem>& vec)
 requires is_basic_vec<t_cont<t_elem>>
 {
-	if(vec.size()==0) return t_elem{};
-	else if(vec.size()==1) return *vec.begin();
+	if(vec.size() == 0)
+		return t_elem{};
+	else if(vec.size() == 1)
+		return *vec.begin();
 
-	using namespace tl2_ops;
-
+	//using namespace tl2_ops;
 	//t_elem meanvec = std::accumulate(std::next(vec.begin(), 1), vec.end(), *vec.begin());
 
 	t_elem meanvec = *vec.begin();
 	auto iter = std::next(vec.begin(), 1);
-	for(; iter!=vec.end(); iter=std::next(iter, 1))
+	for(; iter != vec.end(); iter = std::next(iter, 1))
 		meanvec += *iter;
 
 	meanvec /= vec.size();

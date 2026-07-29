@@ -43,7 +43,7 @@
 #include <cmath>
 
 #include "decls.h"
-#include "constants.h"
+#include "scalar.h"
 
 
 
@@ -297,29 +297,6 @@ requires is_quat<t_quat> && is_vec<t_vec>
 
 
 /**
- * quat -> complex 2x2 matrix
- * @see (Scherer 2010), p.173
- * @see (Desktop Bronstein 2008), ch. 4, equations (4.163a) and (4.163b)
- * @see (Bronstein 2008), ch. 4, p. 296, equation (4.110a) and (4.110b)
- */
-template<class t_mat, class t_mat_cplx, class t_quat>
-t_mat_cplx quat_to_cmat(const t_quat& quat)
-requires is_quat<t_quat> && is_mat<t_mat> && is_mat<t_mat_cplx>
-{
-	using t_cplx = typename t_mat_cplx::value_type;
-
-	const auto matI = unit<t_mat_cplx>(2);
-	t_mat_cplx mat =
-		t_cplx(quat.R_component_1()) * matI +
-		t_cplx(quat.R_component_2()) * su2_matrix<t_mat_cplx>(0) +
-		t_cplx(quat.R_component_3()) * su2_matrix<t_mat_cplx>(1) +
-		t_cplx(quat.R_component_4()) * su2_matrix<t_mat_cplx>(2);
-
-	return mat;
-}
-
-
-/**
  * rotation angle
  * @see https://en.wikipedia.org/wiki/Quaternions_and_spatial_rotation#Quaternion-derived_rotation_matrix
  */
@@ -418,33 +395,6 @@ requires is_quat<t_quat> && is_vec<t_vec>
 	T dAngle = std::atan2(dS, dC);
 
 	return rotation_quat<t_vec, t_quat>(vecaxis, dAngle);
-}
-
-
-template<class t_quat>
-t_quat rotation_quat_x(typename t_quat::value_type angle)
-requires is_quat<t_quat>
-{
-	using T = typename t_quat::value_type;
-	return t_quat{std::cos(T(0.5)*angle), std::sin(T(0.5)*angle), T(0), T(0)};
-}
-
-
-template<class t_quat>
-t_quat rotation_quat_y(typename t_quat::value_type angle)
-requires is_quat<t_quat>
-{
-	using T = typename t_quat::value_type;
-	return t_quat{std::cos(T(0.5)*angle), T(0), std::sin(T(0.5)*angle), T(0)};
-}
-
-
-template<class t_quat>
-t_quat rotation_quat_z(typename t_quat::value_type angle)
-requires is_quat<t_quat>
-{
-	using T = typename t_quat::value_type;
-	return t_quat{std::cos(T(0.5)*angle), T(0), T(0), std::sin(T(0.5)*angle)};
 }
 
 // ----------------------------------------------------------------------------

@@ -45,7 +45,7 @@
 #include <limits>
 
 #include "decls.h"
-#include "constants.h"
+#include "scalar.h"
 
 
 
@@ -991,54 +991,6 @@ requires is_vec<t_vec>
 	return std::make_tuple(min, max);
 }
 
-
-/**
- * checks if a point is inside a bounding box
- * @see https://developer.mozilla.org/en-US/docs/Games/Techniques/3D_collision_detection
- */
-template<class t_vec> requires is_vec<t_vec>
-bool in_bounding_box(
-	const t_vec& pt, const std::tuple<t_vec, t_vec>& bb)
-{
-	const std::size_t dim = pt.size();
-
-	const t_vec& min = std::get<0>(bb);
-	const t_vec& max = std::get<1>(bb);
-
-	for(std::size_t i = 0; i < dim; ++i)
-	{
-		if(pt[i] < min[i] || pt[i] > max[i])
-			return false;
-	}
-
-	return true;
-}
-
-
-/**
- * checks for bounding box intersection
- * @see https://developer.mozilla.org/en-US/docs/Games/Techniques/3D_collision_detection
- */
-template<class t_vec> requires is_vec<t_vec>
-bool collide_bounding_boxes(
-	const std::tuple<t_vec, t_vec>& bb1,
-	const std::tuple<t_vec, t_vec>& bb2)
-{
-	// invalid bounding boxes?
-	if(std::get<0>(bb1).size() == 0 || std::get<1>(bb1).size() == 0 ||
-		std::get<0>(bb2).size() == 0 || std::get<1>(bb2).size() == 0)
-		return false;
-
-	const std::size_t dim = std::min(std::get<0>(bb1).size(), std::get<0>(bb2).size());
-	for(std::size_t i = 0; i < dim; ++i)
-	{
-		if(std::get<0>(bb1)[i] > std::get<1>(bb2)[i])
-			return false;
-		if(std::get<0>(bb2)[i] > std::get<1>(bb1)[i])
-			return false;
-	}
-	return true;
-}
 // ----------------------------------------------------------------------------
 
 }

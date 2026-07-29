@@ -46,7 +46,7 @@
 #include <limits>
 
 #include "decls.h"
-#include "constants.h"
+#include "scalar.h"
 #include "projectors.h"
 
 

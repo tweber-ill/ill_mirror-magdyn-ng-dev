@@ -591,7 +591,7 @@ requires tl2::is_mat<t_mat>
 
 	// TODO: only correct for unit permutation so far...
 	for(int& i : outvec)
-		i = std::abs(i)-1;
+		i = std::abs(i) - 1;
 	t_mat perm = tl2::perm<t_mat>(outvec);
 	C = perm * C;
 

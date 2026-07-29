@@ -122,79 +122,6 @@ requires is_vec<t_vec>
 
 
 /**
- * project vector vec onto the line lineOrigin + lam*lineDir
- * (shifts line to go through origin, calculate projection and shift back)
- * @returns [closest point, distance, projection parameter]
- *
- * @see https://de.wikipedia.org/wiki/Lot_(Mathematik)
- */
-template<class t_vec, class t_real = typename t_vec::value_type>
-std::tuple<t_vec, t_real, t_real> project_line(const t_vec& vec,
-	const t_vec& lineOrigin, const t_vec& _lineDir, bool is_normalised = true)
-requires is_vec<t_vec>
-{
-	const t_real lenDir = is_normalised ? 1 : norm<t_vec>(_lineDir);
-	const t_vec lineDir = _lineDir / lenDir;
-	const t_vec ptShifted = vec - lineOrigin;
-
-	const t_real paramProj = project_scalar<t_vec, t_real>(ptShifted, lineDir, true);
-	const t_vec ptProj = paramProj * lineDir;
-
-	const t_vec ptNearest = lineOrigin + ptProj;
-	const t_real dist = norm<t_vec>(vec - ptNearest);
-	return std::make_tuple(ptNearest, dist, paramProj);
-}
-
-
-/**
- * distance between point and line
- * @see (Arens 2015), p. 711
- */
-template<class t_vec, class t_real = typename t_vec::value_type>
-t_real dist_pt_line(const t_vec& pt,
-	const t_vec& linePt1, const t_vec& linePt2,
-	bool bLineIsInfinite = true)
-requires is_vec<t_vec>
-{
-	const std::size_t dim = linePt1.size();
-
-	const t_vec lineDir = linePt2 - linePt1;
-	const auto [nearestPt, dist, paramProj] =
-		project_line<t_vec>(pt, linePt1, lineDir, false);
-
-
-	// get point component with max. difference
-	t_real diff = -1.;
-	std::size_t compidx = 0;
-	for(std::size_t i=0; i<dim; ++i)
-	{
-		t_real newdiff = std::abs(linePt2[i] - linePt1[i]);
-		if(newdiff > diff)
-		{
-			diff = newdiff;
-			compidx = i;
-		}
-	}
-
-
-	t_real t = (nearestPt[compidx]-linePt1[compidx]) / (linePt2[compidx]-linePt1[compidx]);
-	if(bLineIsInfinite || (t>=t_real{0} && t<=t_real{1}))
-	{
-		// projection is on line -> use distance between point and projection
-		return dist;
-	}
-	else
-	{
-		// projection is not on line -> use distance between point and closest line end point
-		if(std::abs(t-t_real{0}) < std::abs(t-t_real{1}))
-			return norm<t_vec>(linePt1 - pt);
-		else
-			return norm<t_vec>(linePt2 - pt);
-	}
-}
-
-
-/**
  * matrix to project onto orthogonal complement (plane perpendicular to vector): P = 1-|v><v|
  * from completeness relation: 1 = sum_i |v_i><v_i| = |x><x| + |y><y| + |z><z|
  *
@@ -270,41 +197,6 @@ t_vec ortho_project(const t_vec& vec, const t_vec& vecNorm, bool is_normalised =
 requires is_vec<t_vec>
 {
 	return vec - tl2::project<t_vec>(vec, vecNorm, is_normalised);
-}
-
-
-/**
- * project vector vec onto plane perpendicular to vector vecNorm with distance d
- * vecNorm has to be normalised and plane in Hessian form: x*vecNorm = d
- *
- * @see (Stoecker 1999), Chapter "Analytische Geometrie"
- */
-template<class t_vec>
-t_vec ortho_project_plane(const t_vec& vec,
-	const t_vec& vecNorm, typename t_vec::value_type d)
-requires is_vec<t_vec>
-{
-	// project onto plane through origin
-	t_vec vecProj0 = ortho_project<t_vec>(vec, vecNorm, 1);
-	// add distance of plane to origin
-	return vecProj0 + d*vecNorm;
-}
-
-
-/**
- * mirror a vector on a plane perpendicular to vector vecNorm with distance d
- * vecNorm has to be normalised and plane in Hessian form: x*vecNorm = d
- * @see (Arens 2015), p. 710
- */
-template<class t_vec>
-t_vec ortho_mirror_plane(const t_vec& vec,
-	const t_vec& vecNorm, typename t_vec::value_type d)
-requires is_vec<t_vec>
-{
-	using T = typename t_vec::value_type;
-
-	t_vec vecProj = ortho_project_plane<t_vec>(vec, vecNorm, d);
-	return vec - T(2)*(vec - vecProj);
 }
 
 

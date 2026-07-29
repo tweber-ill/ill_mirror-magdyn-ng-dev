@@ -46,7 +46,6 @@
 
 
 #include "maths/decls.h"
-#include "maths/constants.h"
 #include "maths/operators.h"
 #include "maths/containers.h"
 #include "maths/scalar.h"
