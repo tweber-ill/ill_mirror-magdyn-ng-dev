@@ -36,16 +36,6 @@ MAGPIE_ROOT=..
 echo -e "Magpie root directory: ${MAGPIE_ROOT}"
 
 
-# parse command-line arguments
-skip_takin_libs=0
-for((arg_idx=1; arg_idx<=$#; ++arg_idx)); do
-	if [[ "${!arg_idx}" == "--skip-takin-libs" ]]; then
-		skip_takin_libs=1
-		echo -e "Skipping libraries already built for Takin."
-	fi
-done
-
-
 # build libraries
 if ! ${MAGPIE_ROOT}/setup/externals/build_qhull.sh; then
 	echo -e "Error: Could not build QHull."
@@ -63,18 +53,14 @@ if ! ${MAGPIE_ROOT}/setup/externals/build_qcp.sh; then
 	exit -1
 fi
 
+if ! ${MAGPIE_ROOT}/setup/externals/build_lapacke.sh; then
+echo -e "Error: Could not build Lapack(e)."
+	exit -1
+fi
 
-# build libraries that are also needed by takin
-if [ $skip_takin_libs == 0 ]; then
-	if ! ${MAGPIE_ROOT}/setup/externals/build_lapacke.sh; then
-	echo -e "Error: Could not build Lapack(e)."
-		exit -1
-	fi
-
-	if ! ${MAGPIE_ROOT}/setup/externals/build_minuit.sh; then
-	echo -e "Error: Could not build Minuit."
-		exit -1
-	fi
+if ! ${MAGPIE_ROOT}/setup/externals/build_minuit.sh; then
+echo -e "Error: Could not build Minuit."
+	exit -1
 fi
 
 

@@ -193,7 +193,7 @@ int main(int argc, char** argv)
 	t_real eps = -1.;
 	std::string cfg_file, results_file;
 
-	args::options_description arg_descr("Takin/BZ arguments");
+	args::options_description arg_descr("BZ arguments");
 	arg_descr.add_options()
 		("help,h", args::bool_switch(&show_help), "show help")
 		("healthcheck", args::bool_switch(&health_check), "check program integrity")

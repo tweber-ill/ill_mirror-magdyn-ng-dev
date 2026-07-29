@@ -123,7 +123,7 @@ if [ $create_appdir -ne 0 ]; then
 		exit -1
 	fi
 
-	# program files (changing bin name to not interfere with takin's bundled version)
+	# program files
 	cp -v  build/magpie                 ${APPDIRNAME}${BINDIR}/
 	cp -v  AUTHORS                      ${APPDIRNAME}${SHAREDIR}/${APPNAME}/
 	cp -v  LICENSE                      ${APPDIRNAME}${SHAREDIR}/${APPNAME}/

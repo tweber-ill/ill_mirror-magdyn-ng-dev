@@ -41,7 +41,7 @@
 
 
 MagDynDlg::MagDynDlg(QWidget* pParent) : QDialog{pParent},
-	m_sett{new QSettings{"takin", "magdyn", this}}
+	m_sett{new QSettings{"magpie", "magdyn", this}}
 {
 	BOOST_SCOPE_EXIT(this_)
 	{
@@ -49,8 +49,6 @@ MagDynDlg::MagDynDlg(QWidget* pParent) : QDialog{pParent},
 	} BOOST_SCOPE_EXIT_END
 
 
-	// restore settings done from takin main settings dialog
-	get_settings_from_takin_core();
 	if(g_font != "")
 	{
 		QFont font = this->font();

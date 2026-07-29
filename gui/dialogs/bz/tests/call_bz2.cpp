@@ -52,9 +52,9 @@ int main(int, char**)
 {
 	try
 	{
-		std::string binary = "../build/takin_bz";
+		std::string binary = "../build/bz";
 
-		// runs takin using boost.process, see: https://www.boost.org/doc/libs/1_82_0/doc/html/boost_process/tutorial.html
+		// runs bz using boost.process, see: https://www.boost.org/doc/libs/1_82_0/doc/html/boost_process/tutorial.html
 		proc::opstream istr;
 		proc::ipstream ostr, errstr;
 		proc::child ch(binary + " -c -s", proc::std_in<istr, proc::std_out>ostr, proc::std_err>errstr);

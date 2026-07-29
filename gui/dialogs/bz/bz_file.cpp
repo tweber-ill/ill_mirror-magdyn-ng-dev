@@ -327,7 +327,7 @@ void BZDlg::SaveCutSVG()
 	svg.setViewBox(QRect{0, 0, 800, 800});
 	svg.setFileName(filename);
 	svg.setTitle("Brillouin Zone Cut");
-	svg.setDescription("Created with Takin (https://doi.org/10.5281/zenodo.4117437).");
+	svg.setDescription("Created with Magpie/BZ (https://doi.org/10.5281/zenodo.16180814).");
 
 	QPainter painter;
 	painter.begin(&svg);

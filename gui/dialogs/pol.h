@@ -26,8 +26,8 @@
  * ----------------------------------------------------------------------------
  */
 
-#ifndef __TAKIN_POL__
-#define __TAKIN_POL__
+#ifndef __MAGPIE_POL__
+#define __MAGPIE_POL__
 
 #include <QtCore/QSettings>
 #include <QtWidgets/QLabel>

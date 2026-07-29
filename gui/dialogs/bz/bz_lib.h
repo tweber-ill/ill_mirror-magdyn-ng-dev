@@ -26,8 +26,8 @@
  */
 
 
-#ifndef __TAKIN_BZLIB_H__
-#define __TAKIN_BZLIB_H__
+#ifndef __MAGPIE_BZLIB_H__
+#define __MAGPIE_BZLIB_H__
 
 #include <vector>
 #include <optional>

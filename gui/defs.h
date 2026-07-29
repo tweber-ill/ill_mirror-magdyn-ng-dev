@@ -143,9 +143,6 @@ extern unsigned int g_stop_check_fraction;
 
 	// application icon
 	extern QIcon g_icon;
-
-	// transfer the setting from the takin core program
-	void get_settings_from_takin_core();
 // ----------------------------------------------------------------------------
 
 

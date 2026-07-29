@@ -37,11 +37,11 @@ namespace ios = boost::iostreams;
 
 int main(int, char**)
 {
-	// runs takin using boost.iostreams, see: https://www.boost.org/doc/libs/1_82_0/libs/iostreams/doc/index.html
+	// runs bz using boost.iostreams, see: https://www.boost.org/doc/libs/1_82_0/libs/iostreams/doc/index.html
 	// create stream buffer
 	ios::stream_buffer buf(
 		ios::file_descriptor_source(
-			::fileno(::popen("../build/takin_bz -c -i ../build/0.xml", "r")),
+			::fileno(::popen("../build/bz -c -i ../build/0.xml", "r")),
 		ios::close_handle));
 
 	// create input stream using the stream buffer

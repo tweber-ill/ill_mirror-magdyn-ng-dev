@@ -45,31 +45,11 @@ namespace algo = boost::algorithm;
 
 
 BZDlg::BZDlg(QWidget* pParent) : QDialog{pParent},
-	m_sett{new QSettings{"takin", "bz", this}}
+	m_sett{new QSettings{"magpie", "bz", this}}
 {
 	setWindowTitle("Brillouin Zones");
 	setSizeGripEnabled(true);
 	setFont(QFontDatabase::systemFont(QFontDatabase::GeneralFont));
-
-	// restore settings done from takin main settings dialog
-	QSettings sett_core("takin", "core");
-	if(sett_core.contains("main/font_gen"))
-	{
-		QString font_str = sett_core.value("main/font_gen").toString();
-		QFont font = this->font();
-		//font.setPointSize(14);
-		if(font.fromString(font_str))
-			setFont(font);
-	}
-	if(sett_core.contains("main/prec"))
-	{
-		g_prec_bz = sett_core.value("main/prec").toInt();
-		g_eps_bz = std::pow(t_real(10), -t_real(g_prec_bz));
-	}
-	if(sett_core.contains("main/prec_gfx"))
-	{
-		g_prec_gui_bz = sett_core.value("main/prec_gfx").toInt();
-	}
 
 	// create gui
 	m_tabs_in = new QTabWidget(this);
