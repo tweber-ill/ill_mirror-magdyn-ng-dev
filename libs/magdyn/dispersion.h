@@ -96,9 +96,6 @@ MAGDYN_TYPE::SofQE MAGDYN_INST::UniteEnergies(const MAGDYN_TYPE::SofQE& S) const
 			}
 
 			iter->degeneracy += curState.degeneracy;
-#ifdef MAGDYN_COMPAT
-			iter->weight = iter->weight_perp;
-#endif
 		}
 	}
 

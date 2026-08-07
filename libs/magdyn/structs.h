@@ -179,9 +179,6 @@ struct t_EnergyAndWeight
 	t_mat S_perp{};              // projected dynamical structure factor for neutron scattering
 	t_cplx S_perp_sum{};
 	t_real weight_perp{};
-#ifdef MAGDYN_COMPAT
-	t_real weight{};             // synonym for weight_perp
-#endif
 
 	t_mat S_pol{};               // full dynamical structure factor
 	t_cplx S_pol_sum{};

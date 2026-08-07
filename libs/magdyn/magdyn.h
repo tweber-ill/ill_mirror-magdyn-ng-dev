@@ -85,8 +85,6 @@
 
 #define MAGDYN_TYPE typename MAGDYN_INST
 
-//#define MAGDYN_COMPAT
-
 
 // only print if it's not set to silent mode
 #define TL2_CERR_OPT if(!m_silent) std::cerr
